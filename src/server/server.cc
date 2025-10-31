@@ -63,7 +63,8 @@ Server::Server(engine::Storage *storage, Config *config)
       index_mgr(&indexer, storage),
       start_time_secs_(util::GetTimeStamp()),
       config_(config),
-      namespace_(storage) {
+      namespace_(storage),
+      acl_(storage) {
   // init commands stats here to prevent concurrent insert, and cause core
   auto commands = redis::CommandTable::GetOriginal();
 
@@ -158,6 +159,11 @@ Status Server::Start() {
   if (!s.IsOK()) {
     return s;
   }
+
+  if (config_->acl_preview_enabled) {
+    warn("[server] ACL preview feature is incomplete; do not use in production.");
+  }
+
   if (!config_->master_host.empty()) {
     s = AddMaster(config_->master_host, static_cast<uint32_t>(config_->master_port), false);
     if (!s.IsOK()) return s;
@@ -168,6 +174,11 @@ Status Server::Start() {
     if (!s.IsOK()) {
       return s.Prefixed("failed to shift replication id");
     }
+  }
+
+  s = acl_.LoadAcl();
+  if (!s.IsOK()) {
+    return s;
   }
 
   if (!config_->cluster_enabled) {

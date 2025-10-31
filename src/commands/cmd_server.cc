@@ -1549,6 +1549,67 @@ class CommandFlushBlockCache : public Commander {
   }
 };
 
+class CommandAcl : public Commander {
+ public:
+  Status Parse([[maybe_unused]] const std::vector<std::string> &args) override {
+    if (args.size() < 3) {
+      return {Status::RedisParseErr, errWrongNumOfArguments};
+    }
+    auto sub_command = util::ToLower(args[1]);
+    if (sub_command != "setuser") {
+      return {Status::RedisParseErr, "ACL subcommand must be SETUSER"};
+    }
+    if (args.size() != 4) {
+      return {Status::RedisParseErr, "ACL SETUSER requires username and ON|OFF"};
+    }
+    username_ = args[2];
+    auto flag = util::ToLower(args[3]);
+    if (flag == "on") {
+      enabled_ = true;
+    } else if (flag == "off") {
+      enabled_ = false;
+    } else {
+      return {Status::RedisParseErr, "ACL SETUSER only supports ON or OFF"};
+    }
+    return Status::OK();
+  }
+
+  Status Execute([[maybe_unused]] engine::Context &ctx, Server *srv, Connection *conn,
+                 std::string *output) override {
+    if (!srv->GetConfig()->acl_preview_enabled) {
+      return {Status::RedisExecErr, "ACL preview feature is disabled"};
+    }
+
+    auto *acl = srv->GetAcl();
+    auto user_or = acl->Get(username_);
+    AclUser user;
+    if (user_or.Is<Status::NotFound>()) {
+      user.enabled = enabled_;
+      user.ns = conn->GetNamespace();
+      AclSelector root_selector{};
+      root_selector.flags = 0;
+      user.allowed_commands.emplace_back(std::move(root_selector));
+    } else if (!user_or.IsOK()) {
+      return user_or.ToStatus();
+    } else {
+      user = user_or.GetValue();
+      user.enabled = enabled_;
+    }
+
+    auto status = acl->Set(username_, user);
+    if (!status.IsOK()) {
+      return status;
+    }
+
+    *output = redis::RESP_OK;
+    return Status::OK();
+  }
+
+ private:
+  std::string username_;
+  bool enabled_ = false;
+};
+
 REDIS_REGISTER_COMMANDS(
     Server, MakeCmdAttr<CommandAuth>("auth", 2, "read-only ok-loading auth", NO_KEY),
     MakeCmdAttr<CommandPing>("ping", -1, "read-only", NO_KEY),
@@ -1590,7 +1651,8 @@ REDIS_REGISTER_COMMANDS(
     MakeCmdAttr<CommandApplyBatch>("applybatch", -2, "write no-multi", NO_KEY),
     MakeCmdAttr<CommandDump>("dump", 2, "read-only", 1, 1, 1),
     MakeCmdAttr<CommandPollUpdates>("pollupdates", -2, "read-only admin", NO_KEY),
-    MakeCmdAttr<CommandSST>("sst", -3, "write exclusive admin", 1, 1, 1),
+  MakeCmdAttr<CommandSST>("sst", -3, "write exclusive admin", 1, 1, 1),
     MakeCmdAttr<CommandFlushMemTable>("flushmemtable", -1, "exclusive write", NO_KEY),
-    MakeCmdAttr<CommandFlushBlockCache>("flushblockcache", 1, "exclusive write", NO_KEY), )
+  MakeCmdAttr<CommandFlushBlockCache>("flushblockcache", 1, "exclusive write", NO_KEY),
+  MakeCmdAttr<CommandAcl>("acl", -2, "write admin", NO_KEY), )
 }  // namespace redis

@@ -49,6 +49,7 @@
 #include "namespace.h"
 #include "search/index_manager.h"
 #include "search/indexer.h"
+#include "server/acl.h"
 #include "server/redis_connection.h"
 #include "stats/log_collector.h"
 #include "stats/stats.h"
@@ -336,6 +337,7 @@ class Server {
   std::unique_ptr<SlotMigrator> slot_migrator;
   std::unique_ptr<SlotImport> slot_import;
 
+
   void UpdateWatchedKeysFromArgs(const std::vector<std::string> &args, const redis::CommandAttributes &attr);
   void UpdateWatchedKeysManually(const std::vector<std::string> &keys);
   void WatchKey(redis::Connection *conn, const std::vector<std::string> &keys);
@@ -343,6 +345,7 @@ class Server {
   void ResetWatchedKeys(redis::Connection *conn);
   std::list<std::pair<std::string, uint32_t>> GetSlaveHostAndPort();
   Namespace *GetNamespace() { return &namespace_; }
+  redis::Acl *GetAcl() { return &acl_; }
 
   AuthResult AuthenticateUser(const std::string &user_password, std::string *ns);
 
@@ -390,6 +393,9 @@ class Server {
 
   // namespace
   Namespace namespace_;
+
+  // acl
+  redis::Acl acl_;
 
   // Some jobs to operate DB should be unique
   std::mutex db_job_mu_;
