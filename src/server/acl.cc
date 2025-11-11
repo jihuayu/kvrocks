@@ -1,5 +1,6 @@
 #include "server/acl.h"
 
+#include <algorithm>
 #include <atomic>
 #include <exception>
 #include <unordered_map>
@@ -24,8 +25,6 @@ constexpr const char *kJsonFieldAllowedCommands = "allowed_commands";
 constexpr const char *kJsonFieldAllowedCategories = "allowed_categories";
 constexpr const char *kJsonFieldPatterns = "patterns";
 constexpr const char *kJsonFieldChannels = "channels";
-constexpr const char *kAclStoragePrefix = "acl|";
-
 std::string MakeAclStorageKey(const std::string &username) {
   return std::string(kAclStoragePrefix) + username;
 }
@@ -257,10 +256,10 @@ AclUserManager::AclUserManager() {
   // TODO: Load persisted ACL users and populate username_index_.
 }
 
-int AclUserManager::findFreeSlotLocked() const {
+size_t AclUserManager::findFreeSlotLocked() const {
   for (size_t i = 0; i < user_array_.size(); ++i) {
     if (!std::atomic_load(&user_array_[i])) {
-      return static_cast<int>(i);
+      return i;
     }
   }
   return -1;
@@ -282,6 +281,15 @@ std::shared_ptr<const AclUser> AclUserManager::GetUserByUserName(const std::stri
   const auto slot = static_cast<size_t>(iter->second);
   lock.unlock();
   return GetUserByIndex(slot);
+}
+
+std::optional<size_t> AclUserManager::GetUserIndex(const std::string &username) const {
+  std::shared_lock<std::shared_mutex> lock(mu_);
+  auto iter = username_index_.find(username);
+  if (iter == username_index_.end()) {
+    return std::nullopt;
+  }
+  return iter->second;
 }
 
 std::shared_ptr<const AclUser> AclUserManager::AuthenticateUser(const std::string &username,
@@ -326,7 +334,7 @@ bool AclUserManager::UpdateUser(const std::string &username, std::shared_ptr<con
 bool AclUserManager::SetUser(const std::string &username, std::shared_ptr<const AclUser> user) {
   std::unique_lock<std::shared_mutex> lock(mu_);
   auto iter = username_index_.find(username);
-  int slot = 0;
+  size_t slot = 0;
   if (iter == username_index_.end()) {
     slot = findFreeSlotLocked();
     if (slot < 0) {
@@ -337,7 +345,7 @@ bool AclUserManager::SetUser(const std::string &username, std::shared_ptr<const 
     slot = iter->second;
   }
 
-  std::atomic_store(&user_array_[static_cast<size_t>(slot)], std::move(user));
+  std::atomic_store(&user_array_[slot], std::move(user));
   return true;
 }
 
@@ -347,13 +355,10 @@ bool AclUserManager::AddUser(const std::string &username, std::shared_ptr<const 
     return false;
   }
 
-  const int slot = findFreeSlotLocked();
-  if (slot < 0) {
-    return false;
-  }
+  const size_t slot = findFreeSlotLocked();
 
   username_index_.emplace(username, slot);
-  std::atomic_store(&user_array_[static_cast<size_t>(slot)], std::move(user));
+  std::atomic_store(&user_array_[slot], std::move(user));
   return true;
 }
 
@@ -508,6 +513,54 @@ Status Acl::LoadAcl() {
   return Status::OK();
 }
 
+Status Acl::ApplyReplicatedUpdate(const std::string &username, std::string_view serialized_user) {
+  if (!user_manager_) {
+    user_manager_ = std::make_unique<AclUserManager>();
+  }
+  jsoncons::json parsed;
+  try {
+    parsed = jsoncons::json::parse(serialized_user);
+  } catch (const std::exception &e) {
+    return {Status::NotOK, std::string("failed to parse ACL user JSON: ") + e.what()};
+  }
+
+  auto user_or = AclUser::FromJson(parsed);
+  if (!user_or.IsOK()) {
+    return user_or.ToStatus();
+  }
+
+  auto entry = std::make_shared<const AclUser>(user_or.GetValue());
+  if (!user_manager_->SetUser(username, entry)) {
+    return {Status::NotOK, "maximum number of ACL users reached"};
+  }
+
+  return Status::OK();
+}
+
+Status Acl::ApplyReplicatedDeletion(const std::string &username) {
+  if (!user_manager_) {
+    user_manager_ = std::make_unique<AclUserManager>();
+  }
+  if (!user_manager_->DeleteUser(username)) {
+    return Status::OK();
+  }
+  return Status::OK();
+}
+
+std::optional<size_t> Acl::GetUserIndex(const std::string &username) {
+  if (!user_manager_) {
+    return std::nullopt;
+  }
+  return user_manager_->GetUserIndex(username);
+}
+
+std::shared_ptr<const AclUser> Acl::GetCachedUserByIndex(size_t index) {
+  if (!user_manager_) {
+    return nullptr;
+  }
+  return user_manager_->GetUserByIndex(index);
+}
+
 }  // namespace redis
 
 namespace redis {
@@ -579,6 +632,38 @@ std::vector<std::string> AclCommandManager::CommandsFromBitmap(const std::vector
     }
   }
   return names;
+}
+
+std::vector<uint64_t> AclCommandManager::BuildBitmapForAllCommands() const {
+  std::shared_lock<std::shared_mutex> lock(mu_);
+  if (command_bits_.empty()) {
+    return {};
+  }
+
+  size_t max_bit = 0;
+  for (const auto &[_, bit] : command_bits_) {
+    max_bit = std::max(max_bit, bit);
+  }
+
+  const size_t chunk_count = max_bit / 64 + 1;
+  std::vector<uint64_t> bitmap(chunk_count, 0);
+  for (const auto &[_, bit] : command_bits_) {
+    const size_t index = bit / 64;
+    bitmap[index] |= (UINT64_C(1) << (bit % 64));
+  }
+  return bitmap;
+}
+
+bool AclCommandManager::IsCommandAllowed(const std::vector<uint64_t> &bitmap, const std::string &command) const {
+  auto bit = GetCommandBit(command);
+  if (!bit.has_value()) {
+    return true;
+  }
+  const size_t index = bit.value() / 64;
+  if (bitmap.size() <= index) {
+    return false;
+  }
+  return (bitmap[index] & (UINT64_C(1) << (bit.value() % 64))) != 0;
 }
 
 void AclCommandManager::Seal() {

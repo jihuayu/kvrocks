@@ -38,6 +38,9 @@ class Worker;
 
 namespace redis {
 
+class Acl;
+class AclUser;
+
 class Connection : public EvbufCallbackBase<Connection> {
  public:
   enum Flag {
@@ -175,6 +178,12 @@ class Connection : public EvbufCallbackBase<Connection> {
   void SetImporting() { importing_ = true; }
   bool IsImporting() const { return importing_; }
   bool CanMigrate() const;
+  void SetAclProfile(size_t user_index, std::shared_ptr<const AclUser> user);
+  void ClearAclProfile();
+  bool HasAclProfile() const { return acl_enforced_; }
+
+  // TODO: 
+  Status CheckAclCommandAllowed(Acl *acl, const std::string &cmd_name);
 
   // Multi exec
   void SetInExec() { in_exec_ = true; }
@@ -217,6 +226,10 @@ class Connection : public EvbufCallbackBase<Connection> {
   std::vector<std::string> subscribe_channels_;
   std::vector<std::string> subscribe_patterns_;
   std::vector<std::string> subscribe_shard_channels_;
+
+  bool acl_enforced_ = false;
+  size_t acl_user_index_ = -1;
+  std::shared_ptr<const AclUser> acl_user_;
 
   Server *srv_;
   bool in_exec_ = false;

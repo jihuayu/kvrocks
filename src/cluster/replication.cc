@@ -1127,8 +1127,9 @@ Status ReplicationThread::parseWriteBatch(const rocksdb::WriteBatch &write_batch
     case kBatchTypePublish:
       srv_->PublishMessage(write_batch_handler.Key(), write_batch_handler.Value());
       break;
-    case kBatchTypePropagate:
-      if (write_batch_handler.Key() == engine::kPropagateScriptCommand) {
+    case kBatchTypePropagate: {
+      const auto key = write_batch_handler.Key();
+      if (key == engine::kPropagateScriptCommand) {
         std::vector<std::string> tokens = util::TokenizeRedisProtocol(write_batch_handler.Value());
         if (!tokens.empty()) {
           auto s = srv_->ExecPropagatedCommand(tokens);
@@ -1136,13 +1137,31 @@ Status ReplicationThread::parseWriteBatch(const rocksdb::WriteBatch &write_batch
             return s.Prefixed("failed to execute propagate command");
           }
         }
-      } else if (write_batch_handler.Key() == kNamespaceDBKey) {
+      } else if (key == kNamespaceDBKey) {
         auto s = srv_->GetNamespace()->LoadAndRewrite();
         if (!s.IsOK()) {
           return s.Prefixed("failed to load namespaces");
         }
+      } else if (key.compare(0, redis::kAclStoragePrefix.size(), redis::kAclStoragePrefix) == 0) {
+        auto username = key.substr(redis::kAclStoragePrefix.size());
+        auto s = srv_->GetAcl()->ApplyReplicatedUpdate(username, write_batch_handler.Value());
+        if (!s.IsOK()) {
+          return s.Prefixed("failed to update replicated ACL user");
+        }
       }
       break;
+    }
+    case kBatchTypePropagateDelete: {
+      const auto key = write_batch_handler.Key();
+      if (key.compare(0, redis::kAclStoragePrefix.size(), redis::kAclStoragePrefix) == 0) {
+        auto username = key.substr(redis::kAclStoragePrefix.size());
+        auto s = srv_->GetAcl()->ApplyReplicatedDeletion(username);
+        if (!s.IsOK()) {
+          return s.Prefixed("failed to remove replicated ACL user");
+        }
+      }
+      break;
+    }
     case kBatchTypeStream: {
       auto key = write_batch_handler.Key();
       InternalKey ikey(key, storage_->IsSlotIdEncoded());

@@ -21,6 +21,7 @@
 #include <storage/batch_extractor.h>
 
 #include <ctime>
+#include <memory>
 
 #include "command_parser.h"
 #include "commander.h"
@@ -44,7 +45,10 @@ class CommandAuth : public Commander {
   Status Execute([[maybe_unused]] engine::Context &ctx, Server *srv, Connection *conn, std::string *output) override {
     auto &user_password = args_[1];
     std::string ns;
-    AuthResult result = srv->AuthenticateUser(user_password, &ns);
+    std::shared_ptr<const redis::AclUser> acl_user;
+    int acl_user_index = -1;
+    AuthResult result = srv->AuthenticateUser(user_password, &ns, &acl_user, &acl_user_index);
+    conn->ClearAclProfile();
     switch (result) {
       case AuthResult::NO_REQUIRE_PASS:
         return {Status::RedisExecErr, "Client sent AUTH, but no password is set"};
@@ -52,6 +56,9 @@ class CommandAuth : public Commander {
         return {Status::RedisExecErr, "Invalid password"};
       case AuthResult::IS_USER:
         conn->BecomeUser();
+        if (acl_user && acl_user_index >= 0) {
+          conn->SetAclProfile(acl_user_index, acl_user);
+        }
         break;
       case AuthResult::IS_ADMIN:
         conn->BecomeAdmin();
@@ -842,7 +849,10 @@ class CommandHello final : public Commander {
         }
         const auto &user_password = args_[next_arg + 1];
         std::string ns;
-        AuthResult auth_result = srv->AuthenticateUser(user_password, &ns);
+        std::shared_ptr<const redis::AclUser> acl_user;
+  int acl_user_index = -1;
+  AuthResult auth_result = srv->AuthenticateUser(user_password, &ns, &acl_user, &acl_user_index);
+        conn->ClearAclProfile();
         switch (auth_result) {
           case AuthResult::NO_REQUIRE_PASS:
             return {Status::NotOK, "Client sent AUTH, but no password is set"};
@@ -850,6 +860,9 @@ class CommandHello final : public Commander {
             return {Status::NotOK, "Invalid password"};
           case AuthResult::IS_USER:
             conn->BecomeUser();
+            if (acl_user && acl_user_index >= 0) {
+              conn->SetAclProfile(acl_user_index, acl_user);
+            }
             break;
           case AuthResult::IS_ADMIN:
             conn->BecomeAdmin();
@@ -1559,7 +1572,7 @@ class CommandAcl : public Commander {
     if (sub_command != "setuser") {
       return {Status::RedisParseErr, "ACL subcommand must be SETUSER"};
     }
-    if (args.size() != 4) {
+    if (args.size() < 4) {
       return {Status::RedisParseErr, "ACL SETUSER requires username and ON|OFF"};
     }
     username_ = args[2];
@@ -1570,6 +1583,31 @@ class CommandAcl : public Commander {
       enabled_ = false;
     } else {
       return {Status::RedisParseErr, "ACL SETUSER only supports ON or OFF"};
+    }
+
+    command_toggles_.clear();
+    for (size_t i = 4; i < args.size(); ++i) {
+      std::string token = util::ToLower(args[i]);
+      if (token.size() < 2 || (token[0] != '+' && token[0] != '-')) {
+        return {Status::RedisParseErr, "ACL SETUSER modifiers must start with + or -"};
+      }
+
+      bool allow = token[0] == '+';
+      std::string modifier = token.substr(1);
+      if (modifier.empty()) {
+        return {Status::RedisParseErr, "ACL SETUSER modifier is missing a command name"};
+      }
+
+      CommandToggle toggle;
+      toggle.allow = allow;
+      toggle.original = args[i];
+      if (modifier == "@all") {
+        toggle.all = true;
+      } else {
+        toggle.all = false;
+        toggle.command = modifier;
+      }
+      command_toggles_.emplace_back(std::move(toggle));
     }
     return Status::OK();
   }
@@ -1596,6 +1634,50 @@ class CommandAcl : public Commander {
       user.enabled = enabled_;
     }
 
+    if (user.allowed_commands.empty()) {
+      AclSelector root_selector{};
+      root_selector.flags = 0;
+      user.allowed_commands.emplace_back(std::move(root_selector));
+    }
+
+    auto &root_selector = user.allowed_commands.front();
+    auto trim_bitmap = [](std::vector<uint64_t> &bitmap) {
+      while (!bitmap.empty() && bitmap.back() == 0) {
+        bitmap.pop_back();
+      }
+    };
+
+    auto &command_manager = AclCommandManager::Instance();
+    for (const auto &toggle : command_toggles_) {
+      if (toggle.all) {
+        if (toggle.allow) {
+          root_selector.allowed_commands = command_manager.BuildBitmapForAllCommands();
+        } else {
+          root_selector.allowed_commands.clear();
+        }
+        continue;
+      }
+
+      auto bit = command_manager.GetCommandBit(toggle.command);
+      if (!bit.has_value()) {
+        return {Status::RedisParseErr, "unknown ACL command modifier: " + toggle.original};
+      }
+
+      const size_t index = bit.value() / 64;
+      const uint64_t mask = (UINT64_C(1) << (bit.value() % 64));
+      if (toggle.allow) {
+        if (root_selector.allowed_commands.size() <= index) {
+          root_selector.allowed_commands.resize(index + 1, 0);
+        }
+        root_selector.allowed_commands[index] |= mask;
+      } else {
+        if (root_selector.allowed_commands.size() > index) {
+          root_selector.allowed_commands[index] &= ~mask;
+          trim_bitmap(root_selector.allowed_commands);
+        }
+      }
+    }
+
     auto status = acl->Set(username_, user);
     if (!status.IsOK()) {
       return status;
@@ -1608,6 +1690,13 @@ class CommandAcl : public Commander {
  private:
   std::string username_;
   bool enabled_ = false;
+    struct CommandToggle {
+      bool allow;
+      bool all;
+      std::string command;
+      std::string original;
+    };
+    std::vector<CommandToggle> command_toggles_;
 };
 
 REDIS_REGISTER_COMMANDS(

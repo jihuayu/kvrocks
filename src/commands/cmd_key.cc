@@ -74,7 +74,7 @@ class CommandMoveX : public Commander {
     redis::Database redis(srv->storage, conn->GetNamespace());
 
     std::string ns;
-    AuthResult auth_result = srv->AuthenticateUser(token, &ns);
+  AuthResult auth_result = srv->AuthenticateUser(token, &ns, nullptr, nullptr);
     switch (auth_result) {
       case AuthResult::NO_REQUIRE_PASS:
         return {Status::NotOK, "Forbidden to move key when requirepass is empty"};

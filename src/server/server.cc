@@ -2202,10 +2202,44 @@ std::string Server::GetKeyNameFromCursor(const std::string &cursor, CursorType c
   return {};
 }
 
-AuthResult Server::AuthenticateUser(const std::string &user_password, std::string *ns) {
+AuthResult Server::AuthenticateUser(const std::string &user_password, std::string *ns,
+                                    std::shared_ptr<const redis::AclUser> *acl_user, size_t *acl_user_index) {
+  if (acl_user) {
+    *acl_user = nullptr;
+  }
+  if (acl_user_index) {
+    *acl_user_index = -1;
+  }
+
   const auto &requirepass = GetConfig()->requirepass;
   if (requirepass.empty()) {
     return AuthResult::NO_REQUIRE_PASS;
+  }
+
+  if (config_->acl_preview_enabled) {
+    auto acl_or = acl_.Get(user_password);
+    if (acl_or.IsOK()) {
+      const auto &user = acl_or.GetValue();
+      if (!user.enabled) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      if (acl_user) {
+        *acl_user = std::make_shared<const redis::AclUser>(user);
+      }
+      if (acl_user_index) {
+        auto index = acl_.GetUserIndex(user_password);
+        if (index.has_value()) {
+          *acl_user_index = index.value();
+        }
+      }
+      *ns = user.ns;
+      return AuthResult::IS_USER;
+    }
+    if (!acl_or.Is<Status::NotFound>()) {
+      warn("[server] Failed to load ACL user `{}` during authentication: {}", user_password,
+           acl_or.ToStatus().Msg());
+      return AuthResult::INVALID_PASSWORD;
+    }
   }
 
   auto get_ns = GetNamespace()->GetByToken(user_password);

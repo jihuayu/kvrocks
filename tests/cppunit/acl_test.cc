@@ -20,6 +20,10 @@
 
 #include "server/acl.h"
 
+#include <cstdint>
+
+#include "common/status.h"
+
 #include <gtest/gtest.h>
 
 #include "test_base.h"
@@ -90,5 +94,59 @@ TEST_F(AclTest, SetPersistsUsersToStorage) {
   EXPECT_EQ("ns3", stored.ns);
   ASSERT_EQ(1U, stored.allowed_commands.size());
   EXPECT_EQ(1U, stored.allowed_commands.front().flags);
+}
+
+TEST_F(AclTest, ReplicatedUpdateRefreshesCache) {
+  redis::Acl writer(storage_.get());
+  ASSERT_TRUE(writer.LoadAcl().IsOK());
+  ASSERT_TRUE(writer.Set("dave", BuildUser(true, "ns4")).IsOK());
+
+  redis::Acl replica(storage_.get());
+  ASSERT_TRUE(replica.LoadAcl().IsOK());
+  auto initial_or = replica.Get("dave");
+  ASSERT_TRUE(initial_or.IsOK());
+  EXPECT_TRUE(initial_or.GetValue().enabled);
+
+  auto updated = BuildUser(false, "ns4", 3);
+  ASSERT_TRUE(writer.Set("dave", updated).IsOK());
+  auto serialized = updated.ToJson().to_string();
+
+  ASSERT_TRUE(replica.ApplyReplicatedUpdate("dave", serialized).IsOK());
+  auto refreshed_or = replica.Get("dave");
+  ASSERT_TRUE(refreshed_or.IsOK());
+  const auto &refreshed = refreshed_or.GetValue();
+  EXPECT_FALSE(refreshed.enabled);
+  EXPECT_EQ(3U, refreshed.allowed_commands.front().flags);
+}
+
+TEST_F(AclTest, ReplicatedDeletionEvictsCache) {
+  redis::Acl writer(storage_.get());
+  ASSERT_TRUE(writer.LoadAcl().IsOK());
+  ASSERT_TRUE(writer.Set("erin", BuildUser(true, "ns5")).IsOK());
+
+  redis::Acl replica(storage_.get());
+  ASSERT_TRUE(replica.LoadAcl().IsOK());
+  ASSERT_TRUE(replica.Get("erin").IsOK());
+
+  ASSERT_TRUE(writer.Del("erin").IsOK());
+  ASSERT_TRUE(replica.ApplyReplicatedDeletion("erin").IsOK());
+
+  auto removed_or = replica.Get("erin");
+  EXPECT_TRUE(removed_or.Is<Status::NotFound>());
+}
+
+TEST_F(AclTest, BuildBitmapForAllCommandsIncludesPing) {
+  auto &manager = redis::AclCommandManager::Instance();
+  auto bit = manager.GetCommandBit("ping");
+  ASSERT_TRUE(bit.has_value());
+
+  auto bitmap = manager.BuildBitmapForAllCommands();
+  ASSERT_FALSE(bitmap.empty());
+  EXPECT_TRUE(manager.IsCommandAllowed(bitmap, "ping"));
+
+  const size_t index = bit.value() / 64;
+  ASSERT_LT(index, bitmap.size());
+  bitmap[index] &= ~(UINT64_C(1) << (bit.value() % 64));
+  EXPECT_FALSE(manager.IsCommandAllowed(bitmap, "ping"));
 }
 

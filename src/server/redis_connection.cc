@@ -30,6 +30,7 @@
 #include "logging.h"
 #include "nonstd/span.hpp"
 #include "search/indexer.h"
+#include "server/acl.h"
 #include "server/redis_reply.h"
 #include "string_util.h"
 #ifdef ENABLE_OPENSSL
@@ -205,6 +206,45 @@ bool Connection::CanMigrate() const {
          && !IsFlagEnabled(redis::Connection::kCloseAfterReply)          // close after reply
          && saved_current_command_ == nullptr                            // not executing blocking command like BLPOP
          && subscribe_channels_.empty() && subscribe_patterns_.empty();  // not subscribing any channel
+}
+
+void Connection::SetAclProfile(size_t user_index, std::shared_ptr<const AclUser> user) {
+  acl_enforced_ = true;
+  acl_user_index_ = user_index;
+  acl_user_ = std::move(user);
+}
+
+void Connection::ClearAclProfile() {
+  acl_enforced_ = false;
+  acl_user_index_ = -1;
+  acl_user_.reset();
+}
+
+Status Connection::CheckAclCommandAllowed(Acl *acl, const std::string &cmd_name) {
+  if (!acl_enforced_) {
+    return Status::OK();
+  }
+
+  auto cached_user = acl->GetCachedUserByIndex(acl_user_index_);
+  if (!cached_user) {
+    ClearAclProfile();
+    return {Status::RedisExecErr, "ACL user context is not available"};
+  }
+
+  acl_user_ = std::move(cached_user);
+
+  if (!acl_user_->enabled) {
+    return {Status::RedisExecErr, "ACL user is disabled"};
+  }
+
+  auto &manager = AclCommandManager::Instance();
+  auto command = util::ToLower(cmd_name);
+  const auto &bitmap = acl_user_->allowed_commands.empty() ? std::vector<uint64_t>{} : acl_user_->allowed_commands.front().allowed_commands;
+  if (!manager.IsCommandAllowed(bitmap, command)) {
+    return {Status::RedisExecErr, fmt::format("ACL user is not allowed to run `{}`", command)};
+  }
+
+  return Status::OK();
 }
 
 void Connection::SubscribeChannel(const std::string &channel) {
@@ -491,6 +531,14 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
     // reset the ASKING flag after executing the next query
     if (IsFlagEnabled(kAsking)) {
       DisableFlag(kAsking);
+    }
+
+    if (config->acl_preview_enabled && !IsAdmin() && HasAclProfile()) {
+      auto acl_status = CheckAclCommandAllowed(srv_->GetAcl(), cmd_name);
+      if (!acl_status.IsOK()) {
+        Reply(redis::Error(acl_status));
+        continue;
+      }
     }
 
     multi_error_exit.Disable();
