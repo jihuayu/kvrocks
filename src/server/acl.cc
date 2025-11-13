@@ -28,9 +28,9 @@
 #include <vector>
 
 #include "common/db_util.h"
+#include "common/logging.h"
 #include "common/sha256.h"
 #include "common/status.h"
-#include "common/logging.h"
 #include "common/string_util.h"
 
 namespace redis {
@@ -46,9 +46,7 @@ constexpr const char *kJsonFieldAllowedCommands = "allowed_commands";
 constexpr const char *kJsonFieldAllowedCategories = "allowed_categories";
 constexpr const char *kJsonFieldPatterns = "patterns";
 constexpr const char *kJsonFieldChannels = "channels";
-std::string MakeAclStorageKey(const std::string &username) {
-  return std::string(kAclStoragePrefix) + username;
-}
+std::string MakeAclStorageKey(const std::string &username) { return std::string(kAclStoragePrefix) + username; }
 
 Status PersistAclUser(engine::Storage *storage, const std::string &username, const AclUser &user) {
   engine::Context ctx(storage);
@@ -497,7 +495,6 @@ Status Acl::Del(const std::string &username) {
 }
 
 Status Acl::LoadAcl() {
-
   AclCommandManager::Instance().Seal();
 
   std::vector<std::pair<std::string, std::shared_ptr<const AclUser>>> loaded_users;
