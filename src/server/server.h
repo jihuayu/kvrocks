@@ -337,7 +337,6 @@ class Server {
   std::unique_ptr<SlotMigrator> slot_migrator;
   std::unique_ptr<SlotImport> slot_import;
 
-
   void UpdateWatchedKeysFromArgs(const std::vector<std::string> &args, const redis::CommandAttributes &attr);
   void UpdateWatchedKeysManually(const std::vector<std::string> &keys);
   void WatchKey(redis::Connection *conn, const std::vector<std::string> &keys);
@@ -347,6 +346,9 @@ class Server {
   Namespace *GetNamespace() { return &namespace_; }
   redis::Acl *GetAcl() { return &acl_; }
 
+  AuthResult AuthenticateUser(const std::string &username, const std::string &password, std::string *ns,
+                              std::shared_ptr<const redis::AclUser> *acl_user = nullptr,
+                              size_t *acl_user_index = nullptr);
   AuthResult AuthenticateUser(const std::string &user_password, std::string *ns,
                               std::shared_ptr<const redis::AclUser> *acl_user = nullptr,
                               size_t *acl_user_index = nullptr);

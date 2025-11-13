@@ -23,6 +23,7 @@
 #include <event2/buffer.h>
 
 #include <deque>
+#include <limits>
 #include <memory>
 #include <set>
 #include <string>
@@ -178,11 +179,15 @@ class Connection : public EvbufCallbackBase<Connection> {
   void SetImporting() { importing_ = true; }
   bool IsImporting() const { return importing_; }
   bool CanMigrate() const;
-  void SetAclProfile(size_t user_index, std::shared_ptr<const AclUser> user);
+  static constexpr size_t kInvalidAclUserIndex = std::numeric_limits<size_t>::max();
+
+  void SetAclProfile(const std::string &username, size_t user_index, std::shared_ptr<const AclUser> user);
   void ClearAclProfile();
   bool HasAclProfile() const { return acl_enforced_; }
+  const std::string &GetAclUsername() const { return acl_username_; }
+  size_t GetAclUserIndex() const { return acl_user_index_; }
 
-  // TODO: 
+  // TODO:
   Status CheckAclCommandAllowed(Acl *acl, const std::string &cmd_name);
 
   // Multi exec
@@ -228,7 +233,8 @@ class Connection : public EvbufCallbackBase<Connection> {
   std::vector<std::string> subscribe_shard_channels_;
 
   bool acl_enforced_ = false;
-  size_t acl_user_index_ = -1;
+  std::string acl_username_;
+  size_t acl_user_index_ = kInvalidAclUserIndex;
   std::shared_ptr<const AclUser> acl_user_;
 
   Server *srv_;

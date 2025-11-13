@@ -208,15 +208,17 @@ bool Connection::CanMigrate() const {
          && subscribe_channels_.empty() && subscribe_patterns_.empty();  // not subscribing any channel
 }
 
-void Connection::SetAclProfile(size_t user_index, std::shared_ptr<const AclUser> user) {
+void Connection::SetAclProfile(const std::string &username, size_t user_index, std::shared_ptr<const AclUser> user) {
   acl_enforced_ = true;
+  acl_username_ = username;
   acl_user_index_ = user_index;
   acl_user_ = std::move(user);
 }
 
 void Connection::ClearAclProfile() {
   acl_enforced_ = false;
-  acl_user_index_ = -1;
+  acl_username_.clear();
+  acl_user_index_ = kInvalidAclUserIndex;
   acl_user_.reset();
 }
 
@@ -239,7 +241,8 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const std::string &cmd_name)
 
   auto &manager = AclCommandManager::Instance();
   auto command = util::ToLower(cmd_name);
-  const auto &bitmap = acl_user_->allowed_commands.empty() ? std::vector<uint64_t>{} : acl_user_->allowed_commands.front().allowed_commands;
+  const auto &bitmap = acl_user_->allowed_commands.empty() ? std::vector<uint64_t>{}
+                                                           : acl_user_->allowed_commands.front().allowed_commands;
   if (!manager.IsCommandAllowed(bitmap, command)) {
     return {Status::RedisExecErr, fmt::format("ACL user is not allowed to run `{}`", command)};
   }

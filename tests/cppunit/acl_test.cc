@@ -20,12 +20,11 @@
 
 #include "server/acl.h"
 
+#include <gtest/gtest.h>
+
 #include <cstdint>
 
 #include "common/status.h"
-
-#include <gtest/gtest.h>
-
 #include "test_base.h"
 
 namespace {
@@ -150,3 +149,246 @@ TEST_F(AclTest, BuildBitmapForAllCommandsIncludesPing) {
   EXPECT_FALSE(manager.IsCommandAllowed(bitmap, "ping"));
 }
 
+// Additional ACL tests based on Redis ACL documentation
+
+TEST_F(AclTest, UserEnableDisable) {
+  redis::Acl acl(storage_.get());
+  ASSERT_TRUE(acl.LoadAcl().IsOK());
+
+  // Create a disabled user
+  auto user = BuildUser(false, "default");
+  ASSERT_TRUE(acl.Set("testuser", user).IsOK());
+
+  auto stored_or = acl.Get("testuser");
+  ASSERT_TRUE(stored_or.IsOK());
+  EXPECT_FALSE(stored_or.GetValue().enabled);
+
+  // Enable the user
+  user.enabled = true;
+  ASSERT_TRUE(acl.Set("testuser", user).IsOK());
+
+  stored_or = acl.Get("testuser");
+  ASSERT_TRUE(stored_or.IsOK());
+  EXPECT_TRUE(stored_or.GetValue().enabled);
+}
+
+TEST_F(AclTest, UserPasswordManagement) {
+  redis::Acl acl(storage_.get());
+  ASSERT_TRUE(acl.LoadAcl().IsOK());
+
+  auto user = BuildUser(true, "default");
+
+  // Add password hashes
+  user.passwords.insert("hash1");
+  user.passwords.insert("hash2");
+  ASSERT_TRUE(acl.Set("testuser", user).IsOK());
+
+  auto stored_or = acl.Get("testuser");
+  ASSERT_TRUE(stored_or.IsOK());
+  const auto &stored = stored_or.GetValue();
+  EXPECT_EQ(2U, stored.passwords.size());
+  EXPECT_TRUE(stored.passwords.count("hash1") > 0);
+  EXPECT_TRUE(stored.passwords.count("hash2") > 0);
+
+  // Test nopass (empty password set)
+  user.passwords.clear();
+  ASSERT_TRUE(acl.Set("nopassuser", user).IsOK());
+
+  auto nopass_or = acl.Get("nopassuser");
+  ASSERT_TRUE(nopass_or.IsOK());
+  EXPECT_TRUE(nopass_or.GetValue().passwords.empty());
+}
+
+TEST_F(AclTest, ListUsers) {
+  redis::Acl acl(storage_.get());
+  ASSERT_TRUE(acl.LoadAcl().IsOK());
+
+  // Create multiple users
+  auto user = BuildUser(true, "default");
+  ASSERT_TRUE(acl.Set("alice", user).IsOK());
+  ASSERT_TRUE(acl.Set("bob", user).IsOK());
+  ASSERT_TRUE(acl.Set("charlie", user).IsOK());
+
+  auto users = acl.ListUsers();
+  EXPECT_GE(users.size(), 3U);
+
+  // Check that our users are in the list
+  bool found_alice = false, found_bob = false, found_charlie = false;
+  for (const auto &username : users) {
+    if (username == "alice") found_alice = true;
+    if (username == "bob") found_bob = true;
+    if (username == "charlie") found_charlie = true;
+  }
+  EXPECT_TRUE(found_alice);
+  EXPECT_TRUE(found_bob);
+  EXPECT_TRUE(found_charlie);
+}
+
+TEST_F(AclTest, DeleteUser) {
+  redis::Acl acl(storage_.get());
+  ASSERT_TRUE(acl.LoadAcl().IsOK());
+
+  // Create a user
+  auto user = BuildUser(true, "default");
+  ASSERT_TRUE(acl.Set("tempuser", user).IsOK());
+  ASSERT_TRUE(acl.Get("tempuser").IsOK());
+
+  // Delete the user
+  ASSERT_TRUE(acl.Del("tempuser").IsOK());
+
+  // Verify deletion
+  auto deleted_or = acl.Get("tempuser");
+  EXPECT_TRUE(deleted_or.Is<Status::NotFound>());
+}
+
+TEST_F(AclTest, SelectorKeyPatterns) {
+  redis::Acl acl(storage_.get());
+  ASSERT_TRUE(acl.LoadAcl().IsOK());
+
+  auto user = BuildUser(true, "default");
+
+  // Add key patterns to selector
+  user.allowed_commands[0].patterns.push_back("user:*");
+  user.allowed_commands[0].patterns.push_back("session:*");
+  user.allowed_commands[0].patterns.push_back("cache:*");
+
+  ASSERT_TRUE(acl.Set("patternuser", user).IsOK());
+
+  auto stored_or = acl.Get("patternuser");
+  ASSERT_TRUE(stored_or.IsOK());
+  const auto &stored = stored_or.GetValue();
+  ASSERT_EQ(1U, stored.allowed_commands.size());
+  EXPECT_EQ(3U, stored.allowed_commands[0].patterns.size());
+  EXPECT_EQ("user:*", stored.allowed_commands[0].patterns[0]);
+  EXPECT_EQ("session:*", stored.allowed_commands[0].patterns[1]);
+  EXPECT_EQ("cache:*", stored.allowed_commands[0].patterns[2]);
+}
+
+TEST_F(AclTest, SelectorChannelPatterns) {
+  redis::Acl acl(storage_.get());
+  ASSERT_TRUE(acl.LoadAcl().IsOK());
+
+  auto user = BuildUser(true, "default");
+
+  // Add channel patterns to selector
+  user.allowed_commands[0].channels.push_back("news:*");
+  user.allowed_commands[0].channels.push_back("events:*");
+
+  ASSERT_TRUE(acl.Set("channeluser", user).IsOK());
+
+  auto stored_or = acl.Get("channeluser");
+  ASSERT_TRUE(stored_or.IsOK());
+  const auto &stored = stored_or.GetValue();
+  ASSERT_EQ(1U, stored.allowed_commands.size());
+  EXPECT_EQ(2U, stored.allowed_commands[0].channels.size());
+  EXPECT_EQ("news:*", stored.allowed_commands[0].channels[0]);
+  EXPECT_EQ("events:*", stored.allowed_commands[0].channels[1]);
+}
+
+TEST_F(AclTest, CommandPermissionBitmap) {
+  auto &manager = redis::AclCommandManager::Instance();
+
+  // Test building bitmap for specific commands
+  std::vector<std::string> commands = {"get", "set", "del"};
+  auto bitmap_or = manager.BuildBitmapForCommands(commands);
+  ASSERT_TRUE(bitmap_or.IsOK());
+
+  const auto &bitmap = bitmap_or.GetValue();
+  EXPECT_TRUE(manager.IsCommandAllowed(bitmap, "get"));
+  EXPECT_TRUE(manager.IsCommandAllowed(bitmap, "set"));
+  EXPECT_TRUE(manager.IsCommandAllowed(bitmap, "del"));
+
+  // Commands not in the list should not be allowed
+  EXPECT_FALSE(manager.IsCommandAllowed(bitmap, "flushdb"));
+}
+
+TEST_F(AclTest, MultipleSelectorsSupport) {
+  redis::Acl acl(storage_.get());
+  ASSERT_TRUE(acl.LoadAcl().IsOK());
+
+  auto user = BuildUser(true, "default");
+
+  // Add a second selector
+  redis::AclSelector second_selector{};
+  second_selector.flags = 1;
+  second_selector.patterns.push_back("readonly:*");
+  user.allowed_commands.push_back(second_selector);
+
+  ASSERT_TRUE(acl.Set("multiselect", user).IsOK());
+
+  auto stored_or = acl.Get("multiselect");
+  ASSERT_TRUE(stored_or.IsOK());
+  const auto &stored = stored_or.GetValue();
+  EXPECT_EQ(2U, stored.allowed_commands.size());
+  EXPECT_EQ(0U, stored.allowed_commands[0].flags);
+  EXPECT_EQ(1U, stored.allowed_commands[1].flags);
+  EXPECT_EQ(1U, stored.allowed_commands[1].patterns.size());
+  EXPECT_EQ("readonly:*", stored.allowed_commands[1].patterns[0]);
+}
+
+TEST_F(AclTest, UserIndexMapping) {
+  redis::Acl acl(storage_.get());
+  ASSERT_TRUE(acl.LoadAcl().IsOK());
+
+  auto user = BuildUser(true, "default");
+  ASSERT_TRUE(acl.Set("indexed", user).IsOK());
+
+  // Get user index
+  auto index_opt = acl.GetUserIndex("indexed");
+  ASSERT_TRUE(index_opt.has_value());
+
+  // Get username by index
+  auto username_opt = acl.GetUsernameByIndex(index_opt.value());
+  ASSERT_TRUE(username_opt.has_value());
+  EXPECT_EQ("indexed", username_opt.value());
+
+  // Get user by index
+  auto cached_user = acl.GetCachedUserByIndex(index_opt.value());
+  ASSERT_NE(nullptr, cached_user);
+  EXPECT_TRUE(cached_user->enabled);
+  EXPECT_EQ("default", cached_user->ns);
+}
+
+TEST_F(AclTest, UserJsonSerialization) {
+  auto user = BuildUser(true, "testns", 5);
+  user.passwords.insert("pass1");
+  user.passwords.insert("pass2");
+  user.allowed_commands[0].patterns.push_back("key:*");
+  user.allowed_commands[0].channels.push_back("chan:*");
+
+  // Serialize to JSON
+  auto json = user.ToJson();
+  EXPECT_FALSE(json.is_null());
+
+  // Deserialize from JSON
+  auto deserialized_or = redis::AclUser::FromJson(json);
+  ASSERT_TRUE(deserialized_or.IsOK());
+
+  const auto &deserialized = deserialized_or.GetValue();
+  EXPECT_EQ(user.enabled, deserialized.enabled);
+  EXPECT_EQ(user.ns, deserialized.ns);
+  EXPECT_EQ(user.passwords.size(), deserialized.passwords.size());
+  EXPECT_EQ(user.allowed_commands.size(), deserialized.allowed_commands.size());
+  EXPECT_EQ(user.allowed_commands[0].flags, deserialized.allowed_commands[0].flags);
+}
+
+TEST_F(AclTest, ConcurrentUserOperations) {
+  redis::Acl acl(storage_.get());
+  ASSERT_TRUE(acl.LoadAcl().IsOK());
+
+  // Test concurrent reads and writes
+  auto user1 = BuildUser(true, "ns1");
+  auto user2 = BuildUser(true, "ns2");
+
+  ASSERT_TRUE(acl.Set("concurrent1", user1).IsOK());
+  ASSERT_TRUE(acl.Set("concurrent2", user2).IsOK());
+
+  // Concurrent reads should work
+  auto read1 = acl.Get("concurrent1");
+  auto read2 = acl.Get("concurrent2");
+
+  ASSERT_TRUE(read1.IsOK());
+  ASSERT_TRUE(read2.IsOK());
+  EXPECT_EQ("ns1", read1.GetValue().ns);
+  EXPECT_EQ("ns2", read2.GetValue().ns);
+}

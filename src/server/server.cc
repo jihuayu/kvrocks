@@ -40,6 +40,7 @@
 
 #include "commands/command_parser.h"
 #include "commands/commander.h"
+#include "common/sha256.h"
 #include "common/string_util.h"
 #include "config/config.h"
 #include "fmt/format.h"
@@ -2202,13 +2203,79 @@ std::string Server::GetKeyNameFromCursor(const std::string &cursor, CursorType c
   return {};
 }
 
+AuthResult Server::AuthenticateUser(const std::string &username, const std::string &password, std::string *ns,
+                                    std::shared_ptr<const redis::AclUser> *acl_user, size_t *acl_user_index) {
+  if (username.empty()) {
+    return AuthenticateUser(password, ns, acl_user, acl_user_index);
+  }
+
+  if (acl_user) {
+    *acl_user = nullptr;
+  }
+  if (acl_user_index) {
+    *acl_user_index = redis::Connection::kInvalidAclUserIndex;
+  }
+
+  const auto &requirepass = GetConfig()->requirepass;
+  if (requirepass.empty()) {
+    return AuthResult::NO_REQUIRE_PASS;
+  }
+
+  if (config_->acl_preview_enabled) {
+    auto acl_or = acl_.Get(username);
+    if (acl_or.IsOK()) {
+      const auto &user = acl_or.GetValue();
+      if (!user.enabled) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+
+      if (!user.passwords.empty()) {
+        if (password.empty()) {
+          return AuthResult::INVALID_PASSWORD;
+        }
+        auto digest = util::Sha256Hex(password);
+        if (user.passwords.find(digest) == user.passwords.end()) {
+          return AuthResult::INVALID_PASSWORD;
+        }
+      }
+
+      if (acl_user) {
+        *acl_user = std::make_shared<const redis::AclUser>(user);
+      }
+      if (acl_user_index) {
+        auto index = acl_.GetUserIndex(username);
+        if (index.has_value()) {
+          *acl_user_index = index.value();
+        }
+      }
+      *ns = user.ns;
+      return AuthResult::IS_USER;
+    }
+    if (!acl_or.Is<Status::NotFound>()) {
+      warn("[server] Failed to load ACL user `{}` during authentication: {}", username, acl_or.ToStatus().Msg());
+      return AuthResult::INVALID_PASSWORD;
+    }
+  }
+
+  if (util::ToLower(username) != "default") {
+    return AuthResult::INVALID_PASSWORD;
+  }
+
+  if (password != requirepass) {
+    return AuthResult::INVALID_PASSWORD;
+  }
+
+  *ns = kDefaultNamespace;
+  return AuthResult::IS_ADMIN;
+}
+
 AuthResult Server::AuthenticateUser(const std::string &user_password, std::string *ns,
                                     std::shared_ptr<const redis::AclUser> *acl_user, size_t *acl_user_index) {
   if (acl_user) {
     *acl_user = nullptr;
   }
   if (acl_user_index) {
-    *acl_user_index = -1;
+    *acl_user_index = redis::Connection::kInvalidAclUserIndex;
   }
 
   const auto &requirepass = GetConfig()->requirepass;
@@ -2221,6 +2288,9 @@ AuthResult Server::AuthenticateUser(const std::string &user_password, std::strin
     if (acl_or.IsOK()) {
       const auto &user = acl_or.GetValue();
       if (!user.enabled) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      if (!user.passwords.empty()) {
         return AuthResult::INVALID_PASSWORD;
       }
       if (acl_user) {
@@ -2236,8 +2306,7 @@ AuthResult Server::AuthenticateUser(const std::string &user_password, std::strin
       return AuthResult::IS_USER;
     }
     if (!acl_or.Is<Status::NotFound>()) {
-      warn("[server] Failed to load ACL user `{}` during authentication: {}", user_password,
-           acl_or.ToStatus().Msg());
+      warn("[server] Failed to load ACL user `{}` during authentication: {}", user_password, acl_or.ToStatus().Msg());
       return AuthResult::INVALID_PASSWORD;
     }
   }

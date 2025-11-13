@@ -69,6 +69,8 @@ class AclUserManager {
   bool AddUser(const std::string &username, std::shared_ptr<const AclUser> user);
   bool DeleteUser(const std::string &username);
   void Reset();
+  std::vector<std::string> ListUsernames() const;
+  std::optional<std::string> GetUsernameByIndex(size_t index) const;
 
  private:
   size_t findFreeSlotLocked() const;
@@ -118,6 +120,8 @@ class Acl {
   Status ApplyReplicatedDeletion(const std::string &username);
   std::optional<size_t> GetUserIndex(const std::string &username);
   std::shared_ptr<const AclUser> GetCachedUserByIndex(size_t index);
+  std::vector<std::string> ListUsers() const;
+  std::optional<std::string> GetUsernameByIndex(size_t index) const;
 
  private:
   engine::Storage *storage_;

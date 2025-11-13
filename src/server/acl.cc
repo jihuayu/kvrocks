@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "common/db_util.h"
+#include "common/sha256.h"
 #include "common/status.h"
 #include "common/logging.h"
 #include "common/string_util.h"
@@ -328,14 +329,8 @@ std::shared_ptr<const AclUser> AclUserManager::AuthenticateUser(const std::strin
     return nullptr;
   }
 
-  for (const auto &stored_hash : user->passwords) {
-    if (stored_hash == password) {
-      // TODO: Verify provided password via SHA256 hashing instead of string comparison.
-      return user;
-    }
-  }
-
-  return nullptr;
+  auto digest = util::Sha256Hex(password);
+  return user->passwords.find(digest) != user->passwords.end() ? user : nullptr;
 }
 
 bool AclUserManager::UpdateUser(const std::string &username, std::shared_ptr<const AclUser> user) {
@@ -401,6 +396,26 @@ void AclUserManager::Reset() {
   for (auto &slot : user_array_) {
     std::atomic_store(&slot, std::shared_ptr<const AclUser>{});
   }
+}
+
+std::vector<std::string> AclUserManager::ListUsernames() const {
+  std::shared_lock<std::shared_mutex> lock(mu_);
+  std::vector<std::string> names;
+  names.reserve(username_index_.size());
+  for (const auto &entry : username_index_) {
+    names.emplace_back(entry.first);
+  }
+  return names;
+}
+
+std::optional<std::string> AclUserManager::GetUsernameByIndex(size_t index) const {
+  std::shared_lock<std::shared_mutex> lock(mu_);
+  for (const auto &entry : username_index_) {
+    if (entry.second == index) {
+      return entry.first;
+    }
+  }
+  return std::nullopt;
 }
 
 StatusOr<AclUser> Acl::Get(const std::string &username) {
@@ -579,6 +594,20 @@ std::shared_ptr<const AclUser> Acl::GetCachedUserByIndex(size_t index) {
     return nullptr;
   }
   return user_manager_->GetUserByIndex(index);
+}
+
+std::vector<std::string> Acl::ListUsers() const {
+  if (!user_manager_) {
+    return {};
+  }
+  return user_manager_->ListUsernames();
+}
+
+std::optional<std::string> Acl::GetUsernameByIndex(size_t index) const {
+  if (!user_manager_) {
+    return std::nullopt;
+  }
+  return user_manager_->GetUsernameByIndex(index);
 }
 
 }  // namespace redis
