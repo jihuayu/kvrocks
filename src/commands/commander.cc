@@ -20,8 +20,8 @@
 
 #include "commander.h"
 
-#include "server/acl.h"
 #include "cluster/cluster_defs.h"
+#include "server/acl.h"
 #include "server/redis_reply.h"
 
 namespace redis {
@@ -102,7 +102,10 @@ StatusOr<std::vector<int>> CommandTable::GetKeysFromCommand(const CommandAttribu
       [&](const std::vector<std::string> &, CommandKeyRange key_range) {
         key_range.ForEachKeyIndex([&](int i) { key_indexes.push_back(i); }, cmd_tokens.size());
       },
-      cmd_tokens, [&](const auto &) { status = {Status::NotOK, "The command has no key arguments"}; });
+      cmd_tokens,
+      [&](const auto &) {
+        status = {Status::NotOK, "The command has no key arguments"};
+      });
 
   if (!status) {
     return status;
