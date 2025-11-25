@@ -116,6 +116,9 @@ enum class CommandCategory : uint8_t {
   Txn,
   ZSet,
   Timeseries,
+  // this is a special category for disabling commands,
+  // basically can be used for version releasing or debugging
+  Disabled,
 };
 
 class Commander {
@@ -276,7 +279,11 @@ struct CommandAttributes {
   }
 
   bool CheckArity(int cmd_size) const {
-    return !((arity > 0 && cmd_size != arity) || (arity < 0 && cmd_size < -arity));
+    if (arity >= 0) {
+      return cmd_size == arity;
+    } else {
+      return cmd_size >= -arity;
+    }
   }
 
   StatusOr<CommandKeyRange> InitialKeyRange() const {
