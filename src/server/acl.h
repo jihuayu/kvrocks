@@ -35,7 +35,11 @@
 #include "jsoncons/json.hpp"
 #include "storage/storage.h"
 
+class Namespace;
+
 namespace redis {
+
+class Connection;
 
 class AclSelector {
  public:
@@ -122,6 +126,12 @@ class Acl {
   std::shared_ptr<const AclUser> GetCachedUserByIndex(size_t index);
   std::vector<std::string> ListUsers() const;
   std::optional<std::string> GetUsernameByIndex(size_t index) const;
+
+  Status HandleSetUser(Namespace *ns_mgr, const std::string &username, const std::vector<std::string> &modifiers,
+                       std::string *output);
+  Status HandleGetUser(Connection *conn, const std::string &username, std::string *output);
+  Status HandleWhoAmI(Connection *conn, std::string *output) const;
+  Status HandleUsers(Connection *conn, std::string *output) const;
 
  private:
   engine::Storage *storage_;

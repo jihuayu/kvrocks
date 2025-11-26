@@ -26,7 +26,6 @@
 #include <memory>
 #include <optional>
 #include <string_view>
-#include <variant>
 
 #include "command_parser.h"
 #include "commander.h"
@@ -1614,362 +1613,47 @@ class CommandFlushBlockCache : public Commander {
   }
 };
 
-namespace {
-
-template <typename... Ts>
-struct Overloaded : Ts... {
-  using Ts::operator()...;
-};
-template <typename... Ts>
-Overloaded(Ts...) -> Overloaded<Ts...>;
-
-struct EnableAction {};
-struct DisableAction {};
-struct ResetUserAction {};
-struct ResetPassAction {};
-struct NoPassAction {};
-struct ClearSelectorsAction {};
-
-struct PasswordAction {
-  enum class Kind { kAddPlain, kRemovePlain, kAddHashed, kRemoveHashed };
-  Kind kind;
-  std::string value;
-  std::string original;
-};
-
-struct CommandToggleAction {
-  bool allow;
-  bool all;
-  std::string command;
-  std::string original;
-};
-
-struct CategoryToggleAction {
-  bool allow;
-  bool all;
-  std::string category;
-  std::string original;
-};
-
-struct KeyPatternAction {
-  enum class Kind { kReset, kAll, kAdd };
-  Kind kind;
-  std::string pattern;
-};
-
-struct ChannelPatternAction {
-  enum class Kind { kReset, kAll, kAdd };
-  Kind kind;
-  std::string pattern;
-};
-
-using SetUserAction = std::variant<EnableAction, DisableAction, ResetUserAction, ResetPassAction, NoPassAction,
-                                   PasswordAction, CommandToggleAction, CategoryToggleAction, KeyPatternAction,
-                                   ChannelPatternAction, ClearSelectorsAction>;
-
-bool IsValidSha256Hex(std::string_view value) {
-  if (value.size() != 64) {
-    return false;
-  }
-  for (char ch : value) {
-    if (!std::isxdigit(static_cast<unsigned char>(ch))) {
-      return false;
-    }
-  }
-  return true;
-}
-
-void ResetUserState(redis::AclUser &user) {
-  user.enabled = false;
-  user.passwords.clear();
-  user.allowed_commands.clear();
-  redis::AclSelector root{};
-  root.flags = 0;
-  user.allowed_commands.emplace_back(std::move(root));
-}
-
-redis::AclSelector &EnsureRootSelector(redis::AclUser &user) {
-  if (user.allowed_commands.empty()) {
-    redis::AclSelector root{};
-    root.flags = 0;
-    user.allowed_commands.emplace_back(std::move(root));
-  }
-  return user.allowed_commands.front();
-}
-
-void TrimCommandBitmap(std::vector<uint64_t> &bitmap) {
-  while (!bitmap.empty() && bitmap.back() == 0) {
-    bitmap.pop_back();
-  }
-}
-
-void TrimCategoryBitmap(std::vector<uint32_t> &bitmap) {
-  while (!bitmap.empty() && bitmap.back() == 0) {
-    bitmap.pop_back();
-  }
-}
-
-std::vector<uint64_t> NormalizeCommandBitmap(const std::vector<uint64_t> &bitmap) {
-  auto normalized = bitmap;
-  while (!normalized.empty() && normalized.back() == 0) {
-    normalized.pop_back();
-  }
-  return normalized;
-}
-
-bool CommandBitmapIsAll(const std::vector<uint64_t> &bitmap) {
-  auto normalized = NormalizeCommandBitmap(bitmap);
-  auto all_bitmap = NormalizeCommandBitmap(AclCommandManager::Instance().BuildBitmapForAllCommands());
-  if (normalized.empty() || all_bitmap.empty()) {
-    return false;
-  }
-  return normalized == all_bitmap;
-}
-
-std::vector<std::string> BuildCommandRules(const std::vector<uint64_t> &bitmap) {
-  auto normalized = NormalizeCommandBitmap(bitmap);
-  if (normalized.empty()) {
-    return {"-@all"};
-  }
-
-  auto all_bitmap = NormalizeCommandBitmap(AclCommandManager::Instance().BuildBitmapForAllCommands());
-  if (!all_bitmap.empty() && normalized == all_bitmap) {
-    return {"+@all"};
-  }
-
-  auto commands = AclCommandManager::Instance().CommandsFromBitmap(normalized);
-  std::vector<std::string> result;
-  result.reserve(commands.size());
-  for (const auto &cmd : commands) {
-    result.emplace_back("+" + cmd);
-  }
-  return result;
-}
-
-std::vector<uint32_t> NormalizeCategoryBitmap(const std::vector<uint32_t> &bitmap) {
-  auto normalized = bitmap;
-  while (!normalized.empty() && normalized.back() == 0) {
-    normalized.pop_back();
-  }
-  return normalized;
-}
-
-const std::vector<std::string_view> &AclCategoryNames() {
-  static const std::vector<std::string_view> names = {
-      "@unknown", "@bit",       "@bloomfilter", "@cluster", "@function",    "@geo",    "@hash",   "@hll",
-      "@json",    "@key",       "@list",        "@pubsub",  "@replication", "@script", "@search", "@server",
-      "@set",     "@sortedint", "@stream",      "@string",  "@tdigest",     "@txn",    "@zset",   "@timeseries"};
-  return names;
-}
-
-std::vector<uint32_t> BuildAllCategoryBitmap() {
-  const auto &names = AclCategoryNames();
-  if (names.empty()) {
-    return {};
-  }
-  const size_t chunk_count = (names.size() + 31) / 32;
-  std::vector<uint32_t> bitmap(chunk_count, 0);
-  for (size_t index = 0; index < names.size(); ++index) {
-    const size_t chunk = index / 32;
-    const size_t bit = index % 32;
-    bitmap[chunk] |= (1U << bit);
-  }
-  return bitmap;
-}
-
-std::vector<std::string> BuildCategoryRules(const std::vector<uint32_t> &bitmap) {
-  auto normalized = NormalizeCategoryBitmap(bitmap);
-  std::vector<std::string> result;
-  if (normalized.empty()) {
-    return result;
-  }
-
-  auto all_bitmap = NormalizeCategoryBitmap(BuildAllCategoryBitmap());
-  if (!all_bitmap.empty() && normalized == all_bitmap) {
-    result.emplace_back("+@all");
-    return result;
-  }
-
-  const auto &names = AclCategoryNames();
-  for (size_t chunk_index = 0; chunk_index < normalized.size(); ++chunk_index) {
-    uint32_t chunk = normalized[chunk_index];
-    if (chunk == 0) continue;
-    for (uint32_t bit = 0; bit < 32; ++bit) {
-      if ((chunk & (1U << bit)) == 0) continue;
-      size_t category_index = chunk_index * 32 + bit;
-      if (category_index < names.size()) {
-        result.emplace_back("+" + std::string(names[category_index]));
-      } else {
-        result.emplace_back("+@category" + std::to_string(category_index));
-      }
-    }
-  }
-
-  return result;
-}
-
-StatusOr<size_t> CategoryIndexByName(std::string_view name) {
-  const auto &names = AclCategoryNames();
-  std::string lowered = util::ToLower(std::string{name});
-  for (size_t idx = 0; idx < names.size(); ++idx) {
-    std::string candidate = std::string(names[idx]);
-    if (!candidate.empty() && candidate.front() == '@') {
-      candidate.erase(candidate.begin());
-    }
-    if (util::ToLower(candidate) == lowered) {
-      return idx;
-    }
-  }
-
-  const std::string prefix = "category";
-  if (lowered.rfind(prefix, 0) == 0 && lowered.size() > prefix.size()) {
-    auto numeric = ParseInt<size_t>(lowered.substr(prefix.size()), 10);
-    if (numeric.IsOK()) {
-      return numeric.GetValue();
-    }
-  }
-
-  return Status{Status::RedisParseErr, fmt::format("unknown ACL category: {}", name)};
-}
-
-void EnsureCategoryBit(std::vector<uint32_t> &bitmap, size_t index) {
-  const size_t chunk = index / 32;
-  if (bitmap.size() <= chunk) {
-    bitmap.resize(chunk + 1, 0);
-  }
-}
-
-std::vector<std::string> BuildSelectorFlags(const AclSelector &selector) {
-  std::vector<std::string> flags;
-  if (selector.patterns.empty()) {
-    flags.emplace_back("allkeys");
-  }
-  if (selector.channels.empty()) {
-    flags.emplace_back("allchannels");
-  }
-  if (CommandBitmapIsAll(selector.allowed_commands)) {
-    flags.emplace_back("allcommands");
-  }
-  return flags;
-}
-
-std::vector<std::string> BuildSelectorKeys(const AclSelector &selector) {
-  if (selector.patterns.empty()) {
-    return {"*"};
-  }
-  return selector.patterns;
-}
-
-std::vector<std::string> BuildSelectorChannels(const AclSelector &selector) {
-  if (selector.channels.empty()) {
-    return {"*"};
-  }
-  return selector.channels;
-}
-
-std::vector<std::string> BuildUserFlags(const AclUser &user, const AclSelector *root_selector) {
-  std::vector<std::string> flags;
-  flags.emplace_back(user.enabled ? "on" : "off");
-  flags.emplace_back(user.passwords.empty() ? "nopass" : "hashed");
-
-  if (root_selector != nullptr) {
-    auto selector_flags = BuildSelectorFlags(*root_selector);
-    for (const auto &flag : selector_flags) {
-      if (std::find(flags.begin(), flags.end(), flag) == flags.end()) {
-        flags.push_back(flag);
-      }
-    }
-  }
-
-  return flags;
-}
-
-std::vector<std::string> BuildPasswordArray(const AclUser &user) {
-  std::vector<std::string> passwords;
-  passwords.reserve(user.passwords.size());
-  for (const auto &pwd : user.passwords) {
-    passwords.push_back(pwd);
-  }
-  return passwords;
-}
-
-std::string BuildMapReply(Connection *conn, const std::vector<std::pair<std::string, std::string>> &entries) {
-  std::string result = conn->HeaderOfMap(static_cast<int64_t>(entries.size()));
-  for (const auto &entry : entries) {
-    result += redis::BulkString(entry.first);
-    result += entry.second;
-  }
-  return result;
-}
-
-std::string FormatSelector(Connection *conn, const AclSelector &selector) {
-  std::vector<std::pair<std::string, std::string>> entries;
-  entries.emplace_back("flags", redis::ArrayOfBulkStrings(BuildSelectorFlags(selector)));
-  entries.emplace_back("commands", redis::ArrayOfBulkStrings(BuildCommandRules(selector.allowed_commands)));
-  entries.emplace_back("keys", redis::ArrayOfBulkStrings(BuildSelectorKeys(selector)));
-  entries.emplace_back("channels", redis::ArrayOfBulkStrings(BuildSelectorChannels(selector)));
-  auto categories = BuildCategoryRules(selector.allowed_category);
-  if (!categories.empty()) {
-    entries.emplace_back("categories", redis::ArrayOfBulkStrings(categories));
-  }
-  return BuildMapReply(conn, entries);
-}
-
-std::string FormatAclUser(Connection *conn, const AclUser &user) {
-  const AclSelector *root_selector = user.allowed_commands.empty() ? nullptr : &user.allowed_commands.front();
-
-  std::vector<std::pair<std::string, std::string>> entries;
-  entries.emplace_back("flags", redis::ArrayOfBulkStrings(BuildUserFlags(user, root_selector)));
-  entries.emplace_back("passwords", redis::ArrayOfBulkStrings(BuildPasswordArray(user)));
-
-  const AclSelector default_selector{};
-
-  const auto &selector_ref = root_selector ? *root_selector : default_selector;
-  entries.emplace_back("commands", redis::ArrayOfBulkStrings(BuildCommandRules(selector_ref.allowed_commands)));
-  entries.emplace_back("keys", redis::ArrayOfBulkStrings(BuildSelectorKeys(selector_ref)));
-  entries.emplace_back("channels", redis::ArrayOfBulkStrings(BuildSelectorChannels(selector_ref)));
-  auto categories = BuildCategoryRules(selector_ref.allowed_category);
-  if (!categories.empty()) {
-    entries.emplace_back("categories", redis::ArrayOfBulkStrings(categories));
-  }
-
-  std::vector<std::string> selector_payloads;
-  if (user.allowed_commands.size() > 1) {
-    selector_payloads.reserve(user.allowed_commands.size() - 1);
-    for (size_t i = 1; i < user.allowed_commands.size(); ++i) {
-      selector_payloads.emplace_back(FormatSelector(conn, user.allowed_commands[i]));
-    }
-  }
-  entries.emplace_back("selectors", redis::Array(selector_payloads));
-  entries.emplace_back("namespace", redis::BulkString(user.ns));
-
-  return BuildMapReply(conn, entries);
-}
-
-}  // namespace
-
 class CommandAcl : public Commander {
  public:
-  Status Parse([[maybe_unused]] const std::vector<std::string> &args) override {
+  Status Parse(const std::vector<std::string> &args) override {
     if (args.size() < 2) {
       return {Status::RedisParseErr, errWrongNumOfArguments};
     }
 
-    auto sub_command = util::ToLower(args[1]);
+    const auto sub_command = util::ToLower(args[1]);
     if (sub_command == "setuser") {
-      return parseSetUser(args);
-    }
-    if (sub_command == "getuser") {
-      return parseGetUser(args);
-    }
-    if (sub_command == "whoami") {
-      return parseWhoami(args);
-    }
-    if (sub_command == "users") {
-      return parseUsers(args);
+      if (args.size() < 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kSetUser;
+      username_ = args[2];
+      modifiers_.assign(args.begin() + 3, args.end());
+    } else if (sub_command == "getuser") {
+      if (args.size() != 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kGetUser;
+      username_ = args[2];
+      modifiers_.clear();
+    } else if (sub_command == "whoami") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kWhoAmI;
+      username_.clear();
+      modifiers_.clear();
+    } else if (sub_command == "users") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kUsers;
+      username_.clear();
+      modifiers_.clear();
+    } else {
+      return {Status::RedisParseErr, "ACL subcommand must be SETUSER, GETUSER, USERS or WHOAMI"};
     }
 
-    return {Status::RedisParseErr, "ACL subcommand must be SETUSER, GETUSER, USERS or WHOAMI"};
+    return Commander::Parse(args);
   }
 
   Status Execute([[maybe_unused]] engine::Context &ctx, Server *srv, Connection *conn, std::string *output) override {
@@ -1977,426 +1661,28 @@ class CommandAcl : public Commander {
       return {Status::RedisExecErr, "ACL preview feature is disabled"};
     }
 
+    auto *acl = srv->GetAcl();
     switch (subcommand_) {
       case Subcommand::kSetUser:
-        return executeSetUser(srv, conn, output);
+        return acl->HandleSetUser(srv->GetNamespace(), username_, modifiers_, output);
       case Subcommand::kGetUser:
-        return executeGetUser(srv, conn, output);
+        return acl->HandleGetUser(conn, username_, output);
       case Subcommand::kWhoAmI:
-        return executeWhoami(srv, conn, output);
+        return acl->HandleWhoAmI(conn, output);
       case Subcommand::kUsers:
-        return executeUsers(srv, conn, output);
-      default:
-        return {Status::RedisInvalidCmd, "Unknown ACL subcommand"};
+        return acl->HandleUsers(conn, output);
+      case Subcommand::kUnknown:
+        break;
     }
+    return {Status::RedisInvalidCmd, "Unknown ACL subcommand"};
   }
 
  private:
   enum class Subcommand { kUnknown, kSetUser, kGetUser, kWhoAmI, kUsers };
 
-  Status parseSetUser(const std::vector<std::string> &args) {
-    if (args.size() < 3) {
-      return {Status::RedisParseErr, errWrongNumOfArguments};
-    }
-    subcommand_ = Subcommand::kSetUser;
-    username_ = args[2];
-    actions_.clear();
-    for (size_t i = 3; i < args.size(); ++i) {
-      auto status = parseSetUserToken(args[i]);
-      if (!status.IsOK()) {
-        return status;
-      }
-    }
-    return Status::OK();
-  }
-
-  Status parseGetUser(const std::vector<std::string> &args) {
-    if (args.size() != 3) {
-      return {Status::RedisParseErr, errWrongNumOfArguments};
-    }
-    subcommand_ = Subcommand::kGetUser;
-    username_ = args[2];
-    actions_.clear();
-    return Status::OK();
-  }
-
-  Status parseWhoami(const std::vector<std::string> &args) {
-    if (args.size() != 2) {
-      return {Status::RedisParseErr, errWrongNumOfArguments};
-    }
-    subcommand_ = Subcommand::kWhoAmI;
-    username_.clear();
-    actions_.clear();
-    return Status::OK();
-  }
-
-  Status parseUsers(const std::vector<std::string> &args) {
-    if (args.size() != 2) {
-      return {Status::RedisParseErr, errWrongNumOfArguments};
-    }
-    subcommand_ = Subcommand::kUsers;
-    username_.clear();
-    actions_.clear();
-    return Status::OK();
-  }
-
-  Status parseSetUserToken(const std::string &token) {
-    if (token.empty()) {
-      return {Status::RedisParseErr, "ACL SETUSER modifier must not be empty"};
-    }
-
-    auto lowered = util::ToLower(token);
-    if (lowered == "on") {
-      actions_.emplace_back(EnableAction{});
-      return Status::OK();
-    }
-    if (lowered == "off") {
-      actions_.emplace_back(DisableAction{});
-      return Status::OK();
-    }
-    if (lowered == "reset") {
-      actions_.emplace_back(ResetUserAction{});
-      return Status::OK();
-    }
-    if (lowered == "resetpass") {
-      actions_.emplace_back(ResetPassAction{});
-      return Status::OK();
-    }
-    if (lowered == "nopass") {
-      actions_.emplace_back(NoPassAction{});
-      return Status::OK();
-    }
-    if (lowered == "clearselectors") {
-      actions_.emplace_back(ClearSelectorsAction{});
-      return Status::OK();
-    }
-    if (lowered == "allcommands" || lowered == "+@all") {
-      actions_.emplace_back(CommandToggleAction{true, true, {}, token});
-      return Status::OK();
-    }
-    if (lowered == "nocommands" || lowered == "-@all") {
-      actions_.emplace_back(CommandToggleAction{false, true, {}, token});
-      return Status::OK();
-    }
-    if (lowered == "allkeys") {
-      actions_.emplace_back(KeyPatternAction{KeyPatternAction::Kind::kAll, ""});
-      return Status::OK();
-    }
-    if (lowered == "resetkeys") {
-      actions_.emplace_back(KeyPatternAction{KeyPatternAction::Kind::kReset, ""});
-      return Status::OK();
-    }
-    if (lowered == "allchannels") {
-      actions_.emplace_back(ChannelPatternAction{ChannelPatternAction::Kind::kAll, ""});
-      return Status::OK();
-    }
-    if (lowered == "resetchannels") {
-      actions_.emplace_back(ChannelPatternAction{ChannelPatternAction::Kind::kReset, ""});
-      return Status::OK();
-    }
-
-    switch (token.front()) {
-      case '~': {
-        if (token.size() == 1) {
-          return {Status::RedisParseErr, "ACL SETUSER key pattern modifier requires a pattern"};
-        }
-        actions_.emplace_back(KeyPatternAction{KeyPatternAction::Kind::kAdd, token.substr(1)});
-        return Status::OK();
-      }
-      case '&': {
-        if (token.size() == 1) {
-          return {Status::RedisParseErr, "ACL SETUSER channel pattern modifier requires a pattern"};
-        }
-        actions_.emplace_back(ChannelPatternAction{ChannelPatternAction::Kind::kAdd, token.substr(1)});
-        return Status::OK();
-      }
-      case '+':
-      case '-': {
-        if (token.size() < 2) {
-          return {Status::RedisParseErr, "ACL SETUSER modifier is missing a payload"};
-        }
-        const bool allow = token.front() == '+';
-        if (token[1] == '@') {
-          if (token.size() == 2) {
-            return {Status::RedisParseErr, "ACL SETUSER category modifier requires a category"};
-          }
-          std::string category = util::ToLower(token.substr(2));
-          bool is_all = category == "all";
-          actions_.emplace_back(CategoryToggleAction{allow, is_all, category, token});
-        } else {
-          if (token.find('|') != std::string::npos) {
-            return {Status::RedisParseErr, "command subcommand filters are not supported"};
-          }
-          std::string command = util::ToLower(token.substr(1));
-          actions_.emplace_back(CommandToggleAction{allow, false, command, token});
-        }
-        return Status::OK();
-      }
-      case '>': {
-        if (token.size() == 1) {
-          return {Status::RedisParseErr, "ACL SETUSER password modifier requires a value"};
-        }
-        actions_.emplace_back(PasswordAction{PasswordAction::Kind::kAddPlain, token.substr(1), token});
-        return Status::OK();
-      }
-      case '<': {
-        if (token.size() == 1) {
-          return {Status::RedisParseErr, "ACL SETUSER password modifier requires a value"};
-        }
-        actions_.emplace_back(PasswordAction{PasswordAction::Kind::kRemovePlain, token.substr(1), token});
-        return Status::OK();
-      }
-      case '#': {
-        if (token.size() == 1 || !IsValidSha256Hex(token.substr(1))) {
-          return {Status::RedisParseErr, "invalid hashed password"};
-        }
-        actions_.emplace_back(PasswordAction{PasswordAction::Kind::kAddHashed, token.substr(1), token});
-        return Status::OK();
-      }
-      case '!': {
-        if (token.size() == 1 || !IsValidSha256Hex(token.substr(1))) {
-          return {Status::RedisParseErr, "invalid hashed password"};
-        }
-        actions_.emplace_back(PasswordAction{PasswordAction::Kind::kRemoveHashed, token.substr(1), token});
-        return Status::OK();
-      }
-      case '(': {
-        return {Status::RedisParseErr, "ACL selectors are not supported"};
-      }
-      case '%': {
-        return {Status::RedisParseErr, "key permission prefixes (%R, %W) are not supported"};
-      }
-      default:
-        break;
-    }
-
-    return {Status::RedisParseErr, fmt::format("ACL SETUSER modifier '{}' is not supported", token)};
-  }
-
-  Status executeSetUser(Server *srv, Connection *conn, std::string *output) {
-    auto *acl = srv->GetAcl();
-    auto user_or = acl->Get(username_);
-    AclUser user;
-    if (user_or.Is<Status::NotFound>()) {
-      user.enabled = false;
-      user.ns = conn->GetNamespace();
-      ResetUserState(user);
-    } else if (!user_or.IsOK()) {
-      return user_or.ToStatus();
-    } else {
-      user = user_or.GetValue();
-    }
-
-    if (user.allowed_commands.empty()) {
-      ResetUserState(user);
-      user.ns = user_or.Is<Status::NotFound>() ? conn->GetNamespace() : user.ns;
-    }
-
-    auto apply_password = [&](const PasswordAction &action) -> Status {
-      switch (action.kind) {
-        case PasswordAction::Kind::kAddPlain: {
-          auto digest = util::Sha256Hex(action.value);
-          user.passwords.insert(digest);
-          break;
-        }
-        case PasswordAction::Kind::kRemovePlain: {
-          auto digest = util::Sha256Hex(action.value);
-          user.passwords.erase(digest);
-          break;
-        }
-        case PasswordAction::Kind::kAddHashed: {
-          user.passwords.insert(util::ToLower(action.value));
-          break;
-        }
-        case PasswordAction::Kind::kRemoveHashed: {
-          user.passwords.erase(util::ToLower(action.value));
-          break;
-        }
-      }
-      return Status::OK();
-    };
-
-    auto apply_command_toggle = [&](const CommandToggleAction &toggle) -> Status {
-      auto &root = EnsureRootSelector(user);
-      auto &command_manager = AclCommandManager::Instance();
-      if (toggle.all) {
-        if (toggle.allow) {
-          root.allowed_commands = command_manager.BuildBitmapForAllCommands();
-        } else {
-          root.allowed_commands.clear();
-        }
-        return Status::OK();
-      }
-      auto bit = command_manager.GetCommandBit(toggle.command);
-      if (!bit.has_value()) {
-        return {Status::RedisParseErr, "unknown ACL command modifier: " + toggle.original};
-      }
-      const size_t index = bit.value() / 64;
-      const uint64_t mask = (UINT64_C(1) << (bit.value() % 64));
-      if (toggle.allow) {
-        if (root.allowed_commands.size() <= index) {
-          root.allowed_commands.resize(index + 1, 0);
-        }
-        root.allowed_commands[index] |= mask;
-      } else if (root.allowed_commands.size() > index) {
-        root.allowed_commands[index] &= ~mask;
-        TrimCommandBitmap(root.allowed_commands);
-      }
-      return Status::OK();
-    };
-
-    auto apply_category_toggle = [&](const CategoryToggleAction &toggle) -> Status {
-      auto &root = EnsureRootSelector(user);
-      if (toggle.all) {
-        if (toggle.allow) {
-          root.allowed_category = BuildAllCategoryBitmap();
-        } else {
-          root.allowed_category.clear();
-        }
-        return Status::OK();
-      }
-      auto idx_or = CategoryIndexByName(toggle.category);
-      if (!idx_or.IsOK()) {
-        return idx_or.ToStatus();
-      }
-      auto index = idx_or.GetValue();
-      EnsureCategoryBit(root.allowed_category, index);
-      const size_t chunk = index / 32;
-      const uint32_t mask = 1U << (index % 32);
-      if (toggle.allow) {
-        root.allowed_category[chunk] |= mask;
-      } else {
-        root.allowed_category[chunk] &= ~mask;
-        TrimCategoryBitmap(root.allowed_category);
-      }
-      return Status::OK();
-    };
-
-    auto apply_key_pattern = [&](const KeyPatternAction &action) -> Status {
-      auto &root = EnsureRootSelector(user);
-      switch (action.kind) {
-        case KeyPatternAction::Kind::kReset:
-        case KeyPatternAction::Kind::kAll:
-          root.patterns.clear();
-          break;
-        case KeyPatternAction::Kind::kAdd:
-          if (std::find(root.patterns.begin(), root.patterns.end(), action.pattern) == root.patterns.end()) {
-            root.patterns.emplace_back(action.pattern);
-          }
-          break;
-      }
-      return Status::OK();
-    };
-
-    auto apply_channel_pattern = [&](const ChannelPatternAction &action) -> Status {
-      auto &root = EnsureRootSelector(user);
-      switch (action.kind) {
-        case ChannelPatternAction::Kind::kReset:
-        case ChannelPatternAction::Kind::kAll:
-          root.channels.clear();
-          break;
-        case ChannelPatternAction::Kind::kAdd:
-          if (std::find(root.channels.begin(), root.channels.end(), action.pattern) == root.channels.end()) {
-            root.channels.emplace_back(action.pattern);
-          }
-          break;
-      }
-      return Status::OK();
-    };
-
-    for (const auto &action : actions_) {
-      auto status = std::visit(
-          Overloaded{[&](const EnableAction &) -> Status {
-                       user.enabled = true;
-                       return Status::OK();
-                     },
-                     [&](const DisableAction &) -> Status {
-                       user.enabled = false;
-                       return Status::OK();
-                     },
-                     [&](const ResetUserAction &) -> Status {
-                       ResetUserState(user);
-                       return Status::OK();
-                     },
-                     [&](const ResetPassAction &) -> Status {
-                       user.passwords.clear();
-                       return Status::OK();
-                     },
-                     [&](const NoPassAction &) -> Status {
-                       user.passwords.clear();
-                       return Status::OK();
-                     },
-                     [&](const ClearSelectorsAction &) -> Status {
-                       if (user.allowed_commands.size() > 1) {
-                         user.allowed_commands.erase(user.allowed_commands.begin() + 1, user.allowed_commands.end());
-                       }
-                       return Status::OK();
-                     },
-                     [&](const PasswordAction &pwd) { return apply_password(pwd); },
-                     [&](const CommandToggleAction &toggle) { return apply_command_toggle(toggle); },
-                     [&](const CategoryToggleAction &toggle) { return apply_category_toggle(toggle); },
-                     [&](const KeyPatternAction &pattern) { return apply_key_pattern(pattern); },
-                     [&](const ChannelPatternAction &pattern) { return apply_channel_pattern(pattern); }},
-          action);
-      if (!status.IsOK()) {
-        return status;
-      }
-    }
-
-    auto status = acl->Set(username_, user);
-    if (!status.IsOK()) {
-      return status;
-    }
-
-    *output = redis::RESP_OK;
-    return Status::OK();
-  }
-
-  Status executeGetUser(Server *srv, Connection *conn, std::string *output) {
-    auto *acl = srv->GetAcl();
-    auto user_or = acl->Get(username_);
-    if (user_or.Is<Status::NotFound>()) {
-      *output = conn->NilArray();
-      return Status::OK();
-    }
-    if (!user_or.IsOK()) {
-      return user_or.ToStatus();
-    }
-
-    *output = FormatAclUser(conn, user_or.GetValue());
-    return Status::OK();
-  }
-
-  Status executeWhoami(Server *srv, Connection *conn, std::string *output) {
-    std::string username;
-    if (conn->HasAclProfile()) {
-      username = conn->GetAclUsername();
-      if (username.empty()) {
-        auto index = conn->GetAclUserIndex();
-        if (index != Connection::kInvalidAclUserIndex) {
-          auto name_or = srv->GetAcl()->GetUsernameByIndex(index);
-          if (name_or.has_value()) {
-            username = name_or.value();
-          }
-        }
-      }
-    }
-    if (username.empty()) {
-      username = "default";
-    }
-    *output = redis::BulkString(username);
-    return Status::OK();
-  }
-
-  Status executeUsers(Server *srv, Connection *conn, std::string *output) {
-    auto names = srv->GetAcl()->ListUsers();
-    *output = conn->MultiBulkString(names);
-    return Status::OK();
-  }
-
   Subcommand subcommand_ = Subcommand::kUnknown;
   std::string username_;
-  std::vector<SetUserAction> actions_;
+  std::vector<std::string> modifiers_;
 };
 
 REDIS_REGISTER_COMMANDS(
