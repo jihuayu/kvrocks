@@ -25,7 +25,6 @@ import (
 	"testing"
 
 	"github.com/apache/kvrocks/tests/gocase/util"
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -302,7 +301,7 @@ func TestACLSetUserReset(t *testing.T) {
 	t.Run("Reset user to default state", func(t *testing.T) {
 		// Create user with various settings
 		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "resetuser", "on", ">password", "allkeys", "allcommands").Err())
-		
+
 		// Reset the user
 		err := rdb.Do(ctx, "ACL", "SETUSER", "resetuser", "reset").Err()
 		require.NoError(t, err)
