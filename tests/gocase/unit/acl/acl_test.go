@@ -28,9 +28,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func startACLPreviewServer(t *testing.T) *util.KvrocksServer {
+	t.Helper()
+	return util.StartServer(t, map[string]string{
+		"acl-preview-enabled": "yes",
+	})
+}
+
 // TestACLWhoami tests the ACL WHOAMI command
 func TestACLWhoami(t *testing.T) {
-	srv := util.StartServer(t, map[string]string{})
+	srv := startACLPreviewServer(t)
 	defer srv.Close()
 
 	ctx := context.Background()
@@ -46,7 +53,7 @@ func TestACLWhoami(t *testing.T) {
 
 // TestACLUsers tests the ACL USERS command
 func TestACLUsers(t *testing.T) {
-	srv := util.StartServer(t, map[string]string{})
+	srv := startACLPreviewServer(t)
 	defer srv.Close()
 
 	ctx := context.Background()
@@ -77,7 +84,7 @@ func TestACLUsers(t *testing.T) {
 
 // TestACLSetUser tests the ACL SETUSER command with various options
 func TestACLSetUser(t *testing.T) {
-	srv := util.StartServer(t, map[string]string{})
+	srv := startACLPreviewServer(t)
 	defer srv.Close()
 
 	ctx := context.Background()
@@ -147,7 +154,7 @@ func TestACLSetUser(t *testing.T) {
 
 // TestACLSetUserCommands tests ACL SETUSER with command permissions
 func TestACLSetUserCommands(t *testing.T) {
-	srv := util.StartServer(t, map[string]string{})
+	srv := startACLPreviewServer(t)
 	defer srv.Close()
 
 	ctx := context.Background()
@@ -192,7 +199,7 @@ func TestACLSetUserCommands(t *testing.T) {
 
 // TestACLSetUserKeys tests ACL SETUSER with key patterns
 func TestACLSetUserKeys(t *testing.T) {
-	srv := util.StartServer(t, map[string]string{})
+	srv := startACLPreviewServer(t)
 	defer srv.Close()
 
 	ctx := context.Background()
@@ -232,7 +239,7 @@ func TestACLSetUserKeys(t *testing.T) {
 
 // TestACLSetUserChannels tests ACL SETUSER with channel patterns
 func TestACLSetUserChannels(t *testing.T) {
-	srv := util.StartServer(t, map[string]string{})
+	srv := startACLPreviewServer(t)
 	defer srv.Close()
 
 	ctx := context.Background()
@@ -262,7 +269,7 @@ func TestACLSetUserChannels(t *testing.T) {
 
 // TestACLSetUserSelectors tests ACL SETUSER with multiple selectors
 func TestACLSetUserSelectors(t *testing.T) {
-	srv := util.StartServer(t, map[string]string{})
+	srv := startACLPreviewServer(t)
 	defer srv.Close()
 
 	ctx := context.Background()
@@ -291,7 +298,7 @@ func TestACLSetUserSelectors(t *testing.T) {
 
 // TestACLSetUserReset tests ACL SETUSER with reset command
 func TestACLSetUserReset(t *testing.T) {
-	srv := util.StartServer(t, map[string]string{})
+	srv := startACLPreviewServer(t)
 	defer srv.Close()
 
 	ctx := context.Background()
@@ -315,7 +322,7 @@ func TestACLSetUserReset(t *testing.T) {
 
 // TestACLGetUser tests the ACL GETUSER command
 func TestACLGetUser(t *testing.T) {
-	srv := util.StartServer(t, map[string]string{})
+	srv := startACLPreviewServer(t)
 	defer srv.Close()
 
 	ctx := context.Background()
@@ -353,7 +360,7 @@ func TestACLGetUser(t *testing.T) {
 
 // TestACLComplexScenarios tests complex ACL scenarios
 func TestACLComplexScenarios(t *testing.T) {
-	srv := util.StartServer(t, map[string]string{})
+	srv := startACLPreviewServer(t)
 	defer srv.Close()
 
 	ctx := context.Background()
@@ -426,7 +433,7 @@ func TestACLComplexScenarios(t *testing.T) {
 
 // TestACLErrorCases tests error handling in ACL commands
 func TestACLErrorCases(t *testing.T) {
-	srv := util.StartServer(t, map[string]string{})
+	srv := startACLPreviewServer(t)
 	defer srv.Close()
 
 	ctx := context.Background()
