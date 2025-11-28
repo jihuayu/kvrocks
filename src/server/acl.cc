@@ -1307,15 +1307,6 @@ Status Acl::HandleWhoAmI(Connection *conn, std::string *output) const {
   std::string username;
   if (conn->HasAclProfile()) {
     username = conn->GetAclUsername();
-    if (username.empty()) {
-      auto index = conn->GetAclUserIndex();
-      if (index != Connection::kInvalidAclUserIndex) {
-        auto name_or = GetUsernameByIndex(index);
-        if (name_or.has_value()) {
-          username = name_or.value();
-        }
-      }
-    }
   }
   if (username.empty()) {
     username = "default";
