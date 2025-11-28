@@ -167,9 +167,9 @@ TEST_F(AclTest, UserEnableDisable) {
   user.enabled = true;
   ASSERT_TRUE(acl.Set("testuser", user).IsOK());
 
-  stored_or = acl.Get("testuser");
-  ASSERT_TRUE(stored_or.IsOK());
-  EXPECT_TRUE(stored_or.GetValue().enabled);
+  auto stored_or2 = acl.Get("testuser");
+  ASSERT_TRUE(stored_or2.IsOK());
+  EXPECT_TRUE(stored_or2.GetValue().enabled);
 }
 
 TEST_F(AclTest, UserPasswordManagement) {
@@ -248,9 +248,9 @@ TEST_F(AclTest, SelectorKeyPatterns) {
   auto user = BuildUser(true, "default");
 
   // Add key patterns to selector
-  user.allowed_commands[0].patterns.push_back("user:*");
-  user.allowed_commands[0].patterns.push_back("session:*");
-  user.allowed_commands[0].patterns.push_back("cache:*");
+  user.allowed_commands[0].patterns.emplace_back("user:*");
+  user.allowed_commands[0].patterns.emplace_back("session:*");
+  user.allowed_commands[0].patterns.emplace_back("cache:*");
 
   ASSERT_TRUE(acl.Set("patternuser", user).IsOK());
 
@@ -271,8 +271,8 @@ TEST_F(AclTest, SelectorChannelPatterns) {
   auto user = BuildUser(true, "default");
 
   // Add channel patterns to selector
-  user.allowed_commands[0].channels.push_back("news:*");
-  user.allowed_commands[0].channels.push_back("events:*");
+  user.allowed_commands[0].channels.emplace_back("news:*");
+  user.allowed_commands[0].channels.emplace_back("events:*");
 
   ASSERT_TRUE(acl.Set("channeluser", user).IsOK());
 
@@ -311,7 +311,7 @@ TEST_F(AclTest, MultipleSelectorsSupport) {
   // Add a second selector
   redis::AclSelector second_selector{};
   second_selector.flags = 1;
-  second_selector.patterns.push_back("readonly:*");
+  second_selector.patterns.emplace_back("readonly:*");
   user.allowed_commands.push_back(second_selector);
 
   ASSERT_TRUE(acl.Set("multiselect", user).IsOK());
@@ -353,8 +353,8 @@ TEST_F(AclTest, UserJsonSerialization) {
   auto user = BuildUser(true, "testns", 5);
   user.passwords.insert("pass1");
   user.passwords.insert("pass2");
-  user.allowed_commands[0].patterns.push_back("key:*");
-  user.allowed_commands[0].channels.push_back("chan:*");
+  user.allowed_commands[0].patterns.emplace_back("key:*");
+  user.allowed_commands[0].channels.emplace_back("chan:*");
 
   // Serialize to JSON
   auto json = user.ToJson();
