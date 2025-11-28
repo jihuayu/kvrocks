@@ -1303,7 +1303,7 @@ Status Acl::HandleGetUser(Connection *conn, const std::string &username, std::st
   return Status::OK();
 }
 
-Status Acl::HandleWhoAmI(Connection *conn, std::string *output) const {
+Status Acl::HandleWhoAmI(Connection *conn, std::string *output) {
   std::string username;
   if (conn->HasAclProfile()) {
     username = conn->GetAclUsername();

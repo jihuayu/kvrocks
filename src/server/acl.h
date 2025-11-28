@@ -130,7 +130,7 @@ class Acl {
   Status HandleSetUser(Namespace *ns_mgr, const std::string &username, const std::vector<std::string> &modifiers,
                        std::string *output);
   Status HandleGetUser(Connection *conn, const std::string &username, std::string *output);
-  Status HandleWhoAmI(Connection *conn, std::string *output) const;
+  static Status HandleWhoAmI(Connection *conn, std::string *output);
   Status HandleUsers(Connection *conn, std::string *output) const;
 
  private:
