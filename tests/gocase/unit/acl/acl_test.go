@@ -182,17 +182,20 @@ func TestACLSetUserCommands(t *testing.T) {
 	})
 
 	t.Run("Allow command category with @category", func(t *testing.T) {
-		err := rdb.Do(ctx, "ACL", "SETUSER", "cmduser5", "on", "@read").Err()
+		// Use a valid category from kvrocks: @string, @hash, @list, @set, @zset, etc.
+		err := rdb.Do(ctx, "ACL", "SETUSER", "cmduser5", "on", "+@string").Err()
 		require.NoError(t, err)
 	})
 
 	t.Run("Deny command category with -@category", func(t *testing.T) {
-		err := rdb.Do(ctx, "ACL", "SETUSER", "cmduser6", "on", "allcommands", "-@dangerous").Err()
+		// Use a valid category from kvrocks
+		err := rdb.Do(ctx, "ACL", "SETUSER", "cmduser6", "on", "allcommands", "-@script").Err()
 		require.NoError(t, err)
 	})
 
-	t.Run("Allow all categories with allcategories", func(t *testing.T) {
-		err := rdb.Do(ctx, "ACL", "SETUSER", "cmduser7", "on", "allcategories").Err()
+	t.Run("Allow all categories with +@all", func(t *testing.T) {
+		// kvrocks uses +@all instead of allcategories
+		err := rdb.Do(ctx, "ACL", "SETUSER", "cmduser7", "on", "+@all").Err()
 		require.NoError(t, err)
 	})
 }
@@ -226,14 +229,18 @@ func TestACLSetUserKeys(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("Add read-only key pattern with %R~pattern", func(t *testing.T) {
+	t.Run("Read-write key permission prefixes not supported", func(t *testing.T) {
+		// %R and %W prefixes are not supported in kvrocks
 		err := rdb.Do(ctx, "ACL", "SETUSER", "keyuser5", "on", "%R~readonly:*").Err()
-		require.NoError(t, err)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not supported")
 	})
 
-	t.Run("Add write-only key pattern with %W~pattern", func(t *testing.T) {
+	t.Run("Write-only key permission prefixes not supported", func(t *testing.T) {
+		// %R and %W prefixes are not supported in kvrocks
 		err := rdb.Do(ctx, "ACL", "SETUSER", "keyuser6", "on", "%W~writeonly:*").Err()
-		require.NoError(t, err)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not supported")
 	})
 }
 
@@ -276,23 +283,27 @@ func TestACLSetUserSelectors(t *testing.T) {
 	rdb := srv.NewClient()
 	defer func() { require.NoError(t, rdb.Close()) }()
 
-	t.Run("Add selector with parentheses", func(t *testing.T) {
+	t.Run("Selectors are not supported", func(t *testing.T) {
+		// ACL selectors with parentheses are not supported in kvrocks
 		err := rdb.Do(ctx, "ACL", "SETUSER", "seluser1", "on", "+get", "(", "+set", "~cache:*", ")").Err()
-		require.NoError(t, err)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not supported")
 	})
 
-	t.Run("Multiple selectors", func(t *testing.T) {
+	t.Run("Multiple selectors not supported", func(t *testing.T) {
+		// ACL selectors are not supported in kvrocks
 		err := rdb.Do(ctx, "ACL", "SETUSER", "seluser2", "on",
 			"+get", "~read:*",
-			"(", "+set", "+del", "~write:*", ")",
-			"(", "@admin", "~admin:*", ")").Err()
-		require.NoError(t, err)
+			"(", "+set", "+del", "~write:*", ")").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not supported")
 	})
 
-	t.Run("Clear selectors with clearselectors", func(t *testing.T) {
-		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "seluser3", "on", "+get", "(", "+set", ")").Err())
+	t.Run("Clearselectors not supported", func(t *testing.T) {
+		// clearselectors is not supported in kvrocks
 		err := rdb.Do(ctx, "ACL", "SETUSER", "seluser3", "clearselectors").Err()
-		require.NoError(t, err)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not supported")
 	})
 }
 
@@ -338,14 +349,18 @@ func TestACLGetUser(t *testing.T) {
 
 		// Result should be an array of field-value pairs
 		fields, ok := result.([]interface{})
-		require.True(t, ok)
+		require.True(t, ok, "Expected array result from ACL GETUSER")
 		require.NotEmpty(t, fields)
 	})
 
 	t.Run("Get non-existing user returns nil", func(t *testing.T) {
 		result, err := rdb.Do(ctx, "ACL", "GETUSER", "nonexistent").Result()
-		require.NoError(t, err)
-		require.Nil(t, result)
+		// Kvrocks returns nil for non-existent users, which causes a redis: nil error
+		if err != nil {
+			require.Contains(t, err.Error(), "nil")
+		} else {
+			require.Nil(t, result)
+		}
 	})
 
 	t.Run("Get user with detailed information", func(t *testing.T) {
@@ -368,8 +383,9 @@ func TestACLComplexScenarios(t *testing.T) {
 	defer func() { require.NoError(t, rdb.Close()) }()
 
 	t.Run("Read-only user with specific key patterns", func(t *testing.T) {
+		// Use valid kvrocks categories: +@string, +@hash, +@list, etc.
 		err := rdb.Do(ctx, "ACL", "SETUSER", "readonly",
-			"on", ">readpass", "@read", "~data:*", "~cache:*").Err()
+			"on", ">readpass", "+@string", "+@hash", "~data:*", "~cache:*").Err()
 		require.NoError(t, err)
 
 		result, err := rdb.Do(ctx, "ACL", "GETUSER", "readonly").Result()
@@ -377,9 +393,10 @@ func TestACLComplexScenarios(t *testing.T) {
 		require.NotNil(t, result)
 	})
 
-	t.Run("Admin user with all permissions except dangerous commands", func(t *testing.T) {
+	t.Run("Admin user with all permissions except script commands", func(t *testing.T) {
+		// Use valid kvrocks categories
 		err := rdb.Do(ctx, "ACL", "SETUSER", "admin",
-			"on", ">adminpass", "allkeys", "allchannels", "allcommands", "-@dangerous").Err()
+			"on", ">adminpass", "allkeys", "allchannels", "allcommands", "-@script").Err()
 		require.NoError(t, err)
 
 		result, err := rdb.Do(ctx, "ACL", "GETUSER", "admin").Result()
@@ -405,9 +422,10 @@ func TestACLComplexScenarios(t *testing.T) {
 		for _, tenant := range tenants {
 			username := fmt.Sprintf("user_%s", tenant)
 			pattern := fmt.Sprintf("~%s:*", tenant)
+			// Use +@all instead of @all for kvrocks
 			err := rdb.Do(ctx, "ACL", "SETUSER", username,
 				"on", fmt.Sprintf(">%s_pass", tenant),
-				pattern, "@all").Err()
+				pattern, "+@all").Err()
 			require.NoError(t, err)
 		}
 
@@ -473,6 +491,374 @@ func TestACLErrorCases(t *testing.T) {
 	t.Run("ACL USERS with extra arguments fails", func(t *testing.T) {
 		err := rdb.Do(ctx, "ACL", "USERS", "extra").Err()
 		require.Error(t, err)
+	})
+}
+
+// TestACLGetUserFormat tests the format of ACL GETUSER output
+func TestACLGetUserFormat(t *testing.T) {
+	srv := startACLPreviewServer(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	rdb := srv.NewClient()
+	defer func() { require.NoError(t, rdb.Close()) }()
+
+	t.Run("GETUSER returns correct format for simple user", func(t *testing.T) {
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "formatuser1", "on").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "GETUSER", "formatuser1").Result()
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		// Result should be a map/array with expected fields
+		fields, ok := result.([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, fields)
+
+		// Convert to map for easier verification
+		fieldMap := make(map[string]interface{})
+		for i := 0; i < len(fields); i += 2 {
+			key, ok := fields[i].(string)
+			require.True(t, ok)
+			fieldMap[key] = fields[i+1]
+		}
+
+		// Verify expected fields exist
+		require.Contains(t, fieldMap, "flags")
+		require.Contains(t, fieldMap, "passwords")
+		require.Contains(t, fieldMap, "commands")
+		require.Contains(t, fieldMap, "keys")
+		require.Contains(t, fieldMap, "channels")
+		require.Contains(t, fieldMap, "selectors")
+	})
+
+	t.Run("GETUSER flags field contains on/off status", func(t *testing.T) {
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "formatuser2", "on").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "GETUSER", "formatuser2").Result()
+		require.NoError(t, err)
+
+		fields := result.([]interface{})
+		fieldMap := make(map[string]interface{})
+		for i := 0; i < len(fields); i += 2 {
+			fieldMap[fields[i].(string)] = fields[i+1]
+		}
+
+		flags := fieldMap["flags"].([]interface{})
+		flagStrings := make([]string, len(flags))
+		for i, f := range flags {
+			flagStrings[i] = f.(string)
+		}
+		require.Contains(t, flagStrings, "on")
+	})
+
+	t.Run("GETUSER flags field shows off for disabled user", func(t *testing.T) {
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "formatuser3", "off").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "GETUSER", "formatuser3").Result()
+		require.NoError(t, err)
+
+		fields := result.([]interface{})
+		fieldMap := make(map[string]interface{})
+		for i := 0; i < len(fields); i += 2 {
+			fieldMap[fields[i].(string)] = fields[i+1]
+		}
+
+		flags := fieldMap["flags"].([]interface{})
+		flagStrings := make([]string, len(flags))
+		for i, f := range flags {
+			flagStrings[i] = f.(string)
+		}
+		require.Contains(t, flagStrings, "off")
+	})
+
+	t.Run("GETUSER shows nopass flag when set", func(t *testing.T) {
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "formatuser4", "on", "nopass").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "GETUSER", "formatuser4").Result()
+		require.NoError(t, err)
+
+		fields := result.([]interface{})
+		fieldMap := make(map[string]interface{})
+		for i := 0; i < len(fields); i += 2 {
+			fieldMap[fields[i].(string)] = fields[i+1]
+		}
+
+		flags := fieldMap["flags"].([]interface{})
+		flagStrings := make([]string, len(flags))
+		for i, f := range flags {
+			flagStrings[i] = f.(string)
+		}
+		require.Contains(t, flagStrings, "nopass")
+	})
+
+	t.Run("GETUSER passwords field is empty for nopass user", func(t *testing.T) {
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "formatuser5", "on", "nopass").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "GETUSER", "formatuser5").Result()
+		require.NoError(t, err)
+
+		fields := result.([]interface{})
+		fieldMap := make(map[string]interface{})
+		for i := 0; i < len(fields); i += 2 {
+			fieldMap[fields[i].(string)] = fields[i+1]
+		}
+
+		passwords := fieldMap["passwords"].([]interface{})
+		require.Empty(t, passwords)
+	})
+
+	t.Run("GETUSER shows key patterns correctly", func(t *testing.T) {
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "formatuser6", "on", "~user:*", "~cache:*").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "GETUSER", "formatuser6").Result()
+		require.NoError(t, err)
+
+		fields := result.([]interface{})
+		fieldMap := make(map[string]interface{})
+		for i := 0; i < len(fields); i += 2 {
+			fieldMap[fields[i].(string)] = fields[i+1]
+		}
+
+		keys := fieldMap["keys"].([]interface{})
+		require.GreaterOrEqual(t, len(keys), 2)
+	})
+
+	t.Run("GETUSER shows channel patterns correctly", func(t *testing.T) {
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "formatuser7", "on", "&news:*", "&events:*").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "GETUSER", "formatuser7").Result()
+		require.NoError(t, err)
+
+		fields := result.([]interface{})
+		fieldMap := make(map[string]interface{})
+		for i := 0; i < len(fields); i += 2 {
+			fieldMap[fields[i].(string)] = fields[i+1]
+		}
+
+		channels := fieldMap["channels"].([]interface{})
+		require.GreaterOrEqual(t, len(channels), 2)
+	})
+
+	t.Run("GETUSER shows allkeys flag correctly", func(t *testing.T) {
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "formatuser8", "on", "allkeys").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "GETUSER", "formatuser8").Result()
+		require.NoError(t, err)
+
+		fields := result.([]interface{})
+		fieldMap := make(map[string]interface{})
+		for i := 0; i < len(fields); i += 2 {
+			fieldMap[fields[i].(string)] = fields[i+1]
+		}
+
+		flags := fieldMap["flags"].([]interface{})
+		flagStrings := make([]string, len(flags))
+		for i, f := range flags {
+			flagStrings[i] = f.(string)
+		}
+		require.Contains(t, flagStrings, "allkeys")
+	})
+
+	t.Run("GETUSER shows allchannels flag correctly", func(t *testing.T) {
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "formatuser9", "on", "allchannels").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "GETUSER", "formatuser9").Result()
+		require.NoError(t, err)
+
+		fields := result.([]interface{})
+		fieldMap := make(map[string]interface{})
+		for i := 0; i < len(fields); i += 2 {
+			fieldMap[fields[i].(string)] = fields[i+1]
+		}
+
+		flags := fieldMap["flags"].([]interface{})
+		flagStrings := make([]string, len(flags))
+		for i, f := range flags {
+			flagStrings[i] = f.(string)
+		}
+		require.Contains(t, flagStrings, "allchannels")
+	})
+
+	t.Run("GETUSER shows selectors field even without selectors", func(t *testing.T) {
+		// Since kvrocks doesn't support selectors with parentheses, just test basic user
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "formatuser10", "on",
+			"+get", "+set", "~read:*").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "GETUSER", "formatuser10").Result()
+		require.NoError(t, err)
+
+		fields := result.([]interface{})
+		fieldMap := make(map[string]interface{})
+		for i := 0; i < len(fields); i += 2 {
+			fieldMap[fields[i].(string)] = fields[i+1]
+		}
+
+		// The selectors field should still be present
+		require.Contains(t, fieldMap, "selectors")
+	})
+
+	t.Run("GETUSER shows namespace field", func(t *testing.T) {
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "formatuser11", "on").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "GETUSER", "formatuser11").Result()
+		require.NoError(t, err)
+
+		fields := result.([]interface{})
+		fieldMap := make(map[string]interface{})
+		for i := 0; i < len(fields); i += 2 {
+			fieldMap[fields[i].(string)] = fields[i+1]
+		}
+
+		require.Contains(t, fieldMap, "namespace")
+	})
+}
+
+// TestACLUsersFormat tests the format of ACL USERS output
+func TestACLUsersFormat(t *testing.T) {
+	srv := startACLPreviewServer(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	rdb := srv.NewClient()
+	defer func() { require.NoError(t, rdb.Close()) }()
+
+	t.Run("USERS returns array of strings", func(t *testing.T) {
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "listuser1", "on").Err())
+		require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "listuser2", "on").Err())
+
+		result, err := rdb.Do(ctx, "ACL", "USERS").Result()
+		require.NoError(t, err)
+
+		users, ok := result.([]interface{})
+		require.True(t, ok)
+		require.GreaterOrEqual(t, len(users), 2)
+
+		// All elements should be strings
+		for _, u := range users {
+			_, ok := u.(string)
+			require.True(t, ok, "Expected string type for username")
+		}
+	})
+
+	t.Run("USERS includes default user", func(t *testing.T) {
+		result, err := rdb.Do(ctx, "ACL", "USERS").Result()
+		require.NoError(t, err)
+
+		users := result.([]interface{})
+		usernames := make([]string, len(users))
+		for i, u := range users {
+			usernames[i] = u.(string)
+		}
+		require.Contains(t, usernames, "default")
+	})
+}
+
+// TestACLWhoamiFormat tests the format of ACL WHOAMI output
+func TestACLWhoamiFormat(t *testing.T) {
+	srv := startACLPreviewServer(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	rdb := srv.NewClient()
+	defer func() { require.NoError(t, rdb.Close()) }()
+
+	t.Run("WHOAMI returns bulk string", func(t *testing.T) {
+		result, err := rdb.Do(ctx, "ACL", "WHOAMI").Result()
+		require.NoError(t, err)
+
+		username, ok := result.(string)
+		require.True(t, ok, "Expected string type for WHOAMI result")
+		require.NotEmpty(t, username)
+	})
+
+	t.Run("WHOAMI returns default for unauthenticated connection", func(t *testing.T) {
+		result, err := rdb.Do(ctx, "ACL", "WHOAMI").Result()
+		require.NoError(t, err)
+		require.Equal(t, "default", result)
+	})
+}
+
+// TestACLSetUserFormat tests the format of ACL SETUSER responses
+func TestACLSetUserFormat(t *testing.T) {
+	srv := startACLPreviewServer(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+	rdb := srv.NewClient()
+	defer func() { require.NoError(t, rdb.Close()) }()
+
+	t.Run("SETUSER returns OK on success", func(t *testing.T) {
+		result, err := rdb.Do(ctx, "ACL", "SETUSER", "setformatuser1", "on").Result()
+		require.NoError(t, err)
+		require.Equal(t, "OK", result)
+	})
+
+	t.Run("SETUSER returns OK for multiple modifiers", func(t *testing.T) {
+		result, err := rdb.Do(ctx, "ACL", "SETUSER", "setformatuser2",
+			"on", ">password", "allkeys", "+get", "+set").Result()
+		require.NoError(t, err)
+		require.Equal(t, "OK", result)
+	})
+
+	t.Run("SETUSER returns error for invalid modifier", func(t *testing.T) {
+		err := rdb.Do(ctx, "ACL", "SETUSER", "setformatuser3", "invalidmodifier").Err()
+		require.Error(t, err)
+	})
+
+	t.Run("SETUSER returns error for empty key pattern", func(t *testing.T) {
+		err := rdb.Do(ctx, "ACL", "SETUSER", "setformatuser4", "~").Err()
+		require.Error(t, err)
+	})
+
+	t.Run("SETUSER returns error for empty channel pattern", func(t *testing.T) {
+		err := rdb.Do(ctx, "ACL", "SETUSER", "setformatuser5", "&").Err()
+		require.Error(t, err)
+	})
+
+	t.Run("SETUSER returns error for incomplete command modifier", func(t *testing.T) {
+		err := rdb.Do(ctx, "ACL", "SETUSER", "setformatuser6", "+").Err()
+		require.Error(t, err)
+	})
+
+	t.Run("SETUSER returns error for incomplete category modifier", func(t *testing.T) {
+		err := rdb.Do(ctx, "ACL", "SETUSER", "setformatuser7", "+@").Err()
+		require.Error(t, err)
+	})
+}
+
+// TestACLPreviewDisabled tests that ACL commands fail when preview is disabled
+func TestACLPreviewDisabled(t *testing.T) {
+	// Start server without ACL preview enabled
+	srv := util.StartServer(t, map[string]string{})
+	defer srv.Close()
+
+	ctx := context.Background()
+	rdb := srv.NewClient()
+	defer func() { require.NoError(t, rdb.Close()) }()
+
+	t.Run("ACL WHOAMI fails when preview disabled", func(t *testing.T) {
+		err := rdb.Do(ctx, "ACL", "WHOAMI").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "preview")
+	})
+
+	t.Run("ACL USERS fails when preview disabled", func(t *testing.T) {
+		err := rdb.Do(ctx, "ACL", "USERS").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "preview")
+	})
+
+	t.Run("ACL SETUSER fails when preview disabled", func(t *testing.T) {
+		err := rdb.Do(ctx, "ACL", "SETUSER", "testuser", "on").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "preview")
+	})
+
+	t.Run("ACL GETUSER fails when preview disabled", func(t *testing.T) {
+		err := rdb.Do(ctx, "ACL", "GETUSER", "testuser").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "preview")
 	})
 }
 
