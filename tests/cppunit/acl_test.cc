@@ -92,14 +92,14 @@ bool ContainsUsername(const std::vector<std::string> &users, const std::string &
 class AclTest : public TestBase {
  protected:
   // Helper to get a fresh Acl instance with loaded data
-  std::unique_ptr<redis::Acl> CreateAcl() {
+  std::unique_ptr<redis::Acl> createAcl() {
     auto acl = std::make_unique<redis::Acl>(storage_.get());
     EXPECT_TRUE(acl->LoadAcl().IsOK());
     return acl;
   }
 
   // Helper to assert user retrieval and return the user
-  redis::AclUser GetAndAssertUser(redis::Acl &acl, const std::string &username) {
+  static redis::AclUser getAndAssertUser(redis::Acl &acl, const std::string &username) {
     auto user_or = acl.Get(username);
     EXPECT_TRUE(user_or.IsOK()) << "Failed to get user: " << username;
     return user_or.GetValue();
