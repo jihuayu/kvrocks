@@ -41,13 +41,36 @@ namespace redis {
 
 class Connection;
 
+// Key permission flags for ACL key patterns (similar to Redis ACL_READ_PERMISSION, ACL_WRITE_PERMISSION)
+constexpr uint32_t kAclKeyRead = 1 << 0;
+constexpr uint32_t kAclKeyWrite = 1 << 1;
+constexpr uint32_t kAclKeyAll = kAclKeyRead | kAclKeyWrite;
+
+// Key pattern with permissions (%R~pattern, %W~pattern, ~pattern)
+struct AclKeyPattern {
+  std::string pattern;
+  uint32_t flags;  // kAclKeyRead, kAclKeyWrite, or kAclKeyAll
+
+  AclKeyPattern() : flags(kAclKeyAll) {}
+  AclKeyPattern(std::string p, uint32_t f) : pattern(std::move(p)), flags(f) {}
+
+  bool operator==(const AclKeyPattern &other) const { return pattern == other.pattern && flags == other.flags; }
+};
+
 class AclSelector {
  public:
-  uint32_t flags;                          // SELECTOR_FLAG_ALLKEYS, ALLCHANNELS, ALLCOMMANDS, etc.
-  std::vector<uint64_t> allowed_commands;  // Command permission bitmap, size = USER_COMMAND_BITS_COUNT / 64
-  std::vector<uint32_t> allowed_category;  // Command category permission bitmap, size = USER_CATEGORY_BITS_COUNT / 32
-  std::vector<std::string> patterns;       // List of key patterns
-  std::vector<std::string> channels;       // List of channel patterns
+  uint32_t flags;                           // SELECTOR_FLAG_ALLKEYS, ALLCHANNELS, ALLCOMMANDS, etc.
+  std::vector<uint64_t> allowed_commands;   // Command permission bitmap, size = USER_COMMAND_BITS_COUNT / 64
+  std::vector<uint32_t> allowed_category;   // Command category permission bitmap, size = USER_CATEGORY_BITS_COUNT / 32
+  std::vector<AclKeyPattern> key_patterns;  // List of key patterns with permissions
+  std::vector<std::string> channels;        // List of channel patterns
+
+  // Allowed first args for subcommand filtering (e.g., +SELECT|0)
+  // Map: command_id -> list of allowed first args
+  std::map<size_t, std::vector<std::string>> allowed_first_args;
+
+  // Legacy field for compatibility - will be migrated to key_patterns
+  std::vector<std::string> patterns;
 };
 
 class AclUser {

@@ -48,7 +48,19 @@ redis::AclUser BuildUser(bool enabled, const std::string &ns, uint32_t selector_
 // Create a user with specific key patterns
 redis::AclUser BuildUserWithPatterns(const std::string &ns, const std::vector<std::string> &patterns) {
   auto user = BuildUser(true, ns);
-  user.allowed_commands[0].patterns = patterns;
+  for (const auto &p : patterns) {
+    user.allowed_commands[0].key_patterns.emplace_back(p, redis::kAclKeyAll);
+  }
+  return user;
+}
+
+// Create a user with specific key patterns with permissions
+redis::AclUser BuildUserWithKeyPatterns(const std::string &ns,
+                                        const std::vector<std::pair<std::string, uint32_t>> &patterns) {
+  auto user = BuildUser(true, ns);
+  for (const auto &p : patterns) {
+    user.allowed_commands[0].key_patterns.emplace_back(p.first, p.second);
+  }
   return user;
 }
 
@@ -249,11 +261,12 @@ TEST_F(AclTest, SelectorKeyPatterns) {
 
   const auto &stored = GetAndAssertUser(*acl, "patternuser");
   ASSERT_EQ(1U, stored.allowed_commands.size());
-  const auto &patterns = stored.allowed_commands[0].patterns;
-  EXPECT_EQ(3U, patterns.size());
-  EXPECT_EQ("user:*", patterns[0]);
-  EXPECT_EQ("session:*", patterns[1]);
-  EXPECT_EQ("cache:*", patterns[2]);
+  const auto &key_patterns = stored.allowed_commands[0].key_patterns;
+  EXPECT_EQ(3U, key_patterns.size());
+  EXPECT_EQ("user:*", key_patterns[0].pattern);
+  EXPECT_EQ(redis::kAclKeyAll, key_patterns[0].flags);
+  EXPECT_EQ("session:*", key_patterns[1].pattern);
+  EXPECT_EQ("cache:*", key_patterns[2].pattern);
 }
 
 TEST_F(AclTest, SelectorChannelPatterns) {
@@ -276,7 +289,7 @@ TEST_F(AclTest, MultipleSelectorsSupport) {
   // Add second selector
   redis::AclSelector second_selector{};
   second_selector.flags = 1;
-  second_selector.patterns.emplace_back("readonly:*");
+  second_selector.key_patterns.emplace_back("readonly:*", redis::kAclKeyAll);
   user.allowed_commands.push_back(second_selector);
 
   ASSERT_TRUE(acl->Set("multiselect", user).IsOK());
@@ -285,8 +298,8 @@ TEST_F(AclTest, MultipleSelectorsSupport) {
   EXPECT_EQ(2U, stored.allowed_commands.size());
   EXPECT_EQ(0U, stored.allowed_commands[0].flags);
   EXPECT_EQ(1U, stored.allowed_commands[1].flags);
-  EXPECT_EQ(1U, stored.allowed_commands[1].patterns.size());
-  EXPECT_EQ("readonly:*", stored.allowed_commands[1].patterns[0]);
+  EXPECT_EQ(1U, stored.allowed_commands[1].key_patterns.size());
+  EXPECT_EQ("readonly:*", stored.allowed_commands[1].key_patterns[0].pattern);
 }
 
 // ============================================================================
@@ -358,7 +371,7 @@ TEST_F(AclTest, UserJsonSerialization) {
   auto user = BuildUser(true, "testns", 5);
   user.passwords.insert("pass1");
   user.passwords.insert("pass2");
-  user.allowed_commands[0].patterns.emplace_back("key:*");
+  user.allowed_commands[0].key_patterns.emplace_back("key:*", redis::kAclKeyAll);
   user.allowed_commands[0].channels.emplace_back("chan:*");
 
   // Serialize
@@ -395,4 +408,151 @@ TEST_F(AclTest, ConcurrentUserOperations) {
   ASSERT_TRUE(read2.IsOK());
   EXPECT_EQ("ns1", read1.GetValue().ns);
   EXPECT_EQ("ns2", read2.GetValue().ns);
+}
+
+// ============================================================================
+// Key Permission Tests (New Feature: %R~, %W~, %RW~)
+// ============================================================================
+
+TEST_F(AclTest, KeyPatternPermissions) {
+  auto acl = CreateAcl();
+  auto user = BuildUserWithKeyPatterns(
+      "default",
+      {{"read:*", redis::kAclKeyRead}, {"write:*", redis::kAclKeyWrite}, {"readwrite:*", redis::kAclKeyAll}});
+  ASSERT_TRUE(acl->Set("keypermuser", user).IsOK());
+
+  const auto &stored = GetAndAssertUser(*acl, "keypermuser");
+  ASSERT_EQ(1U, stored.allowed_commands.size());
+  const auto &key_patterns = stored.allowed_commands[0].key_patterns;
+  ASSERT_EQ(3U, key_patterns.size());
+
+  EXPECT_EQ("read:*", key_patterns[0].pattern);
+  EXPECT_EQ(redis::kAclKeyRead, key_patterns[0].flags);
+
+  EXPECT_EQ("write:*", key_patterns[1].pattern);
+  EXPECT_EQ(redis::kAclKeyWrite, key_patterns[1].flags);
+
+  EXPECT_EQ("readwrite:*", key_patterns[2].pattern);
+  EXPECT_EQ(redis::kAclKeyAll, key_patterns[2].flags);
+}
+
+TEST_F(AclTest, KeyPatternPermissionsSerialization) {
+  auto user = BuildUser(true, "default");
+  user.allowed_commands[0].key_patterns.emplace_back("readonly:*", redis::kAclKeyRead);
+  user.allowed_commands[0].key_patterns.emplace_back("writeonly:*", redis::kAclKeyWrite);
+  user.allowed_commands[0].key_patterns.emplace_back("full:*", redis::kAclKeyAll);
+
+  // Serialize
+  auto json = user.ToJson();
+  EXPECT_FALSE(json.is_null());
+
+  // Deserialize and verify permissions are preserved
+  auto deserialized_or = redis::AclUser::FromJson(json);
+  ASSERT_TRUE(deserialized_or.IsOK());
+
+  const auto &deserialized = deserialized_or.GetValue();
+  ASSERT_EQ(3U, deserialized.allowed_commands[0].key_patterns.size());
+
+  EXPECT_EQ("readonly:*", deserialized.allowed_commands[0].key_patterns[0].pattern);
+  EXPECT_EQ(redis::kAclKeyRead, deserialized.allowed_commands[0].key_patterns[0].flags);
+
+  EXPECT_EQ("writeonly:*", deserialized.allowed_commands[0].key_patterns[1].pattern);
+  EXPECT_EQ(redis::kAclKeyWrite, deserialized.allowed_commands[0].key_patterns[1].flags);
+
+  EXPECT_EQ("full:*", deserialized.allowed_commands[0].key_patterns[2].pattern);
+  EXPECT_EQ(redis::kAclKeyAll, deserialized.allowed_commands[0].key_patterns[2].flags);
+}
+
+// ============================================================================
+// Subcommand Filter Tests (New Feature: +cmd|subcmd)
+// ============================================================================
+
+TEST_F(AclTest, SubcommandFiltering) {
+  auto user = BuildUser(true, "default");
+  auto &selector = user.allowed_commands[0];
+
+  // Add allowed first arg for a command (e.g., SELECT|0)
+  auto &manager = redis::AclCommandManager::Instance();
+  auto bit = manager.GetCommandBit("select");
+  if (bit.has_value()) {
+    selector.allowed_first_args[bit.value()] = {"0", "1"};
+  }
+
+  // Serialize
+  auto json = user.ToJson();
+  EXPECT_FALSE(json.is_null());
+
+  // Deserialize and verify
+  auto deserialized_or = redis::AclUser::FromJson(json);
+  ASSERT_TRUE(deserialized_or.IsOK());
+
+  const auto &deserialized = deserialized_or.GetValue();
+  if (bit.has_value()) {
+    ASSERT_TRUE(deserialized.allowed_commands[0].allowed_first_args.count(bit.value()) > 0);
+    const auto &args = deserialized.allowed_commands[0].allowed_first_args.at(bit.value());
+    EXPECT_EQ(2U, args.size());
+    EXPECT_EQ("0", args[0]);
+    EXPECT_EQ("1", args[1]);
+  }
+}
+
+// ============================================================================
+// Multiple Selector Tests
+// ============================================================================
+
+TEST_F(AclTest, MultipleSelectorsSerialization) {
+  auto user = BuildUser(true, "default");
+
+  // Root selector with read-only access
+  user.allowed_commands[0].key_patterns.emplace_back("read:*", redis::kAclKeyRead);
+
+  // Second selector with write-only access
+  redis::AclSelector second_selector{};
+  second_selector.flags = 0;
+  second_selector.key_patterns.emplace_back("write:*", redis::kAclKeyWrite);
+  second_selector.channels.emplace_back("events:*");
+  user.allowed_commands.push_back(second_selector);
+
+  // Serialize
+  auto json = user.ToJson();
+  EXPECT_FALSE(json.is_null());
+
+  // Deserialize and verify
+  auto deserialized_or = redis::AclUser::FromJson(json);
+  ASSERT_TRUE(deserialized_or.IsOK());
+
+  const auto &deserialized = deserialized_or.GetValue();
+  ASSERT_EQ(2U, deserialized.allowed_commands.size());
+
+  // Check first selector
+  ASSERT_EQ(1U, deserialized.allowed_commands[0].key_patterns.size());
+  EXPECT_EQ("read:*", deserialized.allowed_commands[0].key_patterns[0].pattern);
+  EXPECT_EQ(redis::kAclKeyRead, deserialized.allowed_commands[0].key_patterns[0].flags);
+
+  // Check second selector
+  ASSERT_EQ(1U, deserialized.allowed_commands[1].key_patterns.size());
+  EXPECT_EQ("write:*", deserialized.allowed_commands[1].key_patterns[0].pattern);
+  EXPECT_EQ(redis::kAclKeyWrite, deserialized.allowed_commands[1].key_patterns[0].flags);
+  ASSERT_EQ(1U, deserialized.allowed_commands[1].channels.size());
+  EXPECT_EQ("events:*", deserialized.allowed_commands[1].channels[0]);
+}
+
+// ============================================================================
+// Key Pattern Struct Tests
+// ============================================================================
+
+TEST_F(AclTest, AclKeyPatternEquality) {
+  redis::AclKeyPattern p1{"key:*", redis::kAclKeyAll};
+  redis::AclKeyPattern p2{"key:*", redis::kAclKeyAll};
+  redis::AclKeyPattern p3{"key:*", redis::kAclKeyRead};
+  redis::AclKeyPattern p4{"other:*", redis::kAclKeyAll};
+
+  EXPECT_TRUE(p1 == p2);
+  EXPECT_FALSE(p1 == p3);  // Different flags
+  EXPECT_FALSE(p1 == p4);  // Different pattern
+}
+
+TEST_F(AclTest, AclKeyPatternDefaultFlags) {
+  redis::AclKeyPattern default_pattern;
+  EXPECT_EQ(redis::kAclKeyAll, default_pattern.flags);  // Default should be all permissions
 }
