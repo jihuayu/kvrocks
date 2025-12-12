@@ -41,6 +41,11 @@ namespace redis {
 
 class Connection;
 
+// NOTE: The ACL (Access Control List) design and implementation in this class follows the guidelines and semantics
+// described in the official Redis documentation:
+//   https://redis.io/docs/latest/operate/oss_and_stack/management/security/acl/
+// Please refer to the above link for detailed behavior, rules, and compatibility expectations.
+
 // Key permission flags for ACL key patterns (similar to Redis ACL_READ_PERMISSION, ACL_WRITE_PERMISSION)
 constexpr uint32_t kAclKeyRead = 1 << 0;
 constexpr uint32_t kAclKeyWrite = 1 << 1;
@@ -64,13 +69,6 @@ class AclSelector {
   std::vector<uint32_t> allowed_category;   // Command category permission bitmap, size = USER_CATEGORY_BITS_COUNT / 32
   std::vector<AclKeyPattern> key_patterns;  // List of key patterns with permissions
   std::vector<std::string> channels;        // List of channel patterns
-
-  // Allowed first args for subcommand filtering (e.g., +SELECT|0)
-  // Map: command_id -> list of allowed first args
-  std::map<size_t, std::vector<std::string>> allowed_first_args;
-
-  // Legacy field for compatibility - will be migrated to key_patterns
-  std::vector<std::string> patterns;
 };
 
 class AclUser {

@@ -464,39 +464,6 @@ TEST_F(AclTest, KeyPatternPermissionsSerialization) {
 }
 
 // ============================================================================
-// Subcommand Filter Tests (New Feature: +cmd|subcmd)
-// ============================================================================
-
-TEST_F(AclTest, SubcommandFiltering) {
-  auto user = BuildUser(true, "default");
-  auto &selector = user.allowed_commands[0];
-
-  // Add allowed first arg for a command (e.g., SELECT|0)
-  auto &manager = redis::AclCommandManager::Instance();
-  auto bit = manager.GetCommandBit("select");
-  if (bit.has_value()) {
-    selector.allowed_first_args[bit.value()] = {"0", "1"};
-  }
-
-  // Serialize
-  auto json = user.ToJson();
-  EXPECT_FALSE(json.is_null());
-
-  // Deserialize and verify
-  auto deserialized_or = redis::AclUser::FromJson(json);
-  ASSERT_TRUE(deserialized_or.IsOK());
-
-  const auto &deserialized = deserialized_or.GetValue();
-  if (bit.has_value()) {
-    ASSERT_TRUE(deserialized.allowed_commands[0].allowed_first_args.count(bit.value()) > 0);
-    const auto &args = deserialized.allowed_commands[0].allowed_first_args.at(bit.value());
-    EXPECT_EQ(2U, args.size());
-    EXPECT_EQ("0", args[0]);
-    EXPECT_EQ("1", args[1]);
-  }
-}
-
-// ============================================================================
 // Multiple Selector Tests
 // ============================================================================
 

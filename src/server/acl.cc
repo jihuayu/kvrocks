@@ -53,10 +53,8 @@ constexpr const char *kJsonFieldSelectors = "selectors";
 constexpr const char *kJsonFieldFlags = "flags";
 constexpr const char *kJsonFieldAllowedCommands = "allowed_commands";
 constexpr const char *kJsonFieldAllowedCategories = "allowed_categories";
-constexpr const char *kJsonFieldPatterns = "patterns";  // Legacy field for compatibility
 constexpr const char *kJsonFieldKeyPatterns = "key_patterns";
 constexpr const char *kJsonFieldChannels = "channels";
-constexpr const char *kJsonFieldAllowedFirstArgs = "allowed_first_args";
 std::string MakeAclStorageKey(const std::string &username) { return std::string(kAclStoragePrefix) + username; }
 
 Status PersistAclUser(engine::Storage *storage, const std::string &username, const AclUser &user) {
@@ -101,36 +99,19 @@ StatusOr<AclSelector> SelectorFromJson(const jsoncons::json &json) {
     }
 
     std::vector<std::string> command_names;
-    std::vector<uint64_t> legacy_bitmap_chunks;
-    bool has_string_elements = false;
-    bool has_numeric_elements = false;
-
     for (size_t i = 0; i < cmds.size(); ++i) {
       const auto &val = cmds[i];
-      if (val.is_string()) {
-        has_string_elements = true;
-        command_names.push_back(val.as_string());
-      } else if (val.is_number()) {
-        has_numeric_elements = true;
-        legacy_bitmap_chunks.push_back(val.as<uint64_t>());
-      } else {
+      if (!val.is_string()) {
         return {Status::NotOK, "allowed_commands entries must be strings"};
       }
+      command_names.push_back(val.as_string());
     }
 
-    if (has_string_elements && has_numeric_elements) {
-      return {Status::NotOK, "allowed_commands entries must not mix strings and numbers"};
+    auto bitmap_or = AclCommandManager::Instance().BuildBitmapForCommands(command_names);
+    if (!bitmap_or.IsOK()) {
+      return bitmap_or.ToStatus().Prefixed("failed to parse allowed_commands");
     }
-
-    if (has_string_elements) {
-      auto bitmap_or = AclCommandManager::Instance().BuildBitmapForCommands(command_names);
-      if (!bitmap_or.IsOK()) {
-        return bitmap_or.ToStatus().Prefixed("failed to parse allowed_commands");
-      }
-      selector.allowed_commands = std::move(bitmap_or.GetValue());
-    } else {
-      selector.allowed_commands = std::move(legacy_bitmap_chunks);
-    }
+    selector.allowed_commands = std::move(bitmap_or.GetValue());
   }
 
   if (json.contains(kJsonFieldAllowedCategories)) {
@@ -148,7 +129,6 @@ StatusOr<AclSelector> SelectorFromJson(const jsoncons::json &json) {
     }
   }
 
-  // Support both legacy "patterns" and new "key_patterns" format
   if (json.contains(kJsonFieldKeyPatterns)) {
     const auto &key_patterns = json[kJsonFieldKeyPatterns];
     if (!key_patterns.is_array()) {
@@ -157,36 +137,17 @@ StatusOr<AclSelector> SelectorFromJson(const jsoncons::json &json) {
     selector.key_patterns.reserve(key_patterns.size());
     for (size_t i = 0; i < key_patterns.size(); ++i) {
       const auto &val = key_patterns[i];
-      if (val.is_string()) {
-        // Simple string format for backward compatibility
-        selector.key_patterns.emplace_back(val.as_string(), kAclKeyAll);
-      } else if (val.is_object()) {
-        // Full format with pattern and flags
-        if (!val.contains("pattern") || !val["pattern"].is_string()) {
-          return {Status::NotOK, "key_patterns entry must have 'pattern' string field"};
-        }
-        uint32_t flags = kAclKeyAll;
-        if (val.contains("flags") && val["flags"].is_number()) {
-          flags = val["flags"].as<uint32_t>();
-        }
-        selector.key_patterns.emplace_back(val["pattern"].as_string(), flags);
-      } else {
-        return {Status::NotOK, "key_patterns entries must be strings or objects"};
+      if (!val.is_object()) {
+        return {Status::NotOK, "key_patterns entries must be objects"};
       }
-    }
-  } else if (json.contains(kJsonFieldPatterns)) {
-    // Legacy format: convert patterns to key_patterns with full permissions
-    const auto &patterns = json[kJsonFieldPatterns];
-    if (!patterns.is_array()) {
-      return {Status::NotOK, "patterns must be an array"};
-    }
-    selector.key_patterns.reserve(patterns.size());
-    for (size_t i = 0; i < patterns.size(); ++i) {
-      const auto &val = patterns[i];
-      if (!val.is_string()) {
-        return {Status::NotOK, "patterns entries must be strings"};
+      if (!val.contains("pattern") || !val["pattern"].is_string()) {
+        return {Status::NotOK, "key_patterns entry must have 'pattern' string field"};
       }
-      selector.key_patterns.emplace_back(val.as_string(), kAclKeyAll);
+      uint32_t flags = kAclKeyAll;
+      if (val.contains("flags") && val["flags"].is_number()) {
+        flags = val["flags"].as<uint32_t>();
+      }
+      selector.key_patterns.emplace_back(val["pattern"].as_string(), flags);
     }
   }
 
@@ -202,32 +163,6 @@ StatusOr<AclSelector> SelectorFromJson(const jsoncons::json &json) {
         return {Status::NotOK, "channels entries must be strings"};
       }
       selector.channels.push_back(val.as_string());
-    }
-  }
-
-  // Deserialize allowed_first_args for subcommand filtering
-  if (json.contains(kJsonFieldAllowedFirstArgs)) {
-    const auto &first_args = json[kJsonFieldAllowedFirstArgs];
-    if (!first_args.is_object()) {
-      return {Status::NotOK, "allowed_first_args must be an object"};
-    }
-    for (const auto &member : first_args.object_range()) {
-      auto cmd_id = ParseInt<size_t>(member.key(), 10);
-      if (!cmd_id.IsOK()) {
-        return {Status::NotOK, "allowed_first_args key must be numeric"};
-      }
-      const auto &args = member.value();
-      if (!args.is_array()) {
-        return {Status::NotOK, "allowed_first_args values must be arrays"};
-      }
-      std::vector<std::string> arg_list;
-      for (size_t i = 0; i < args.size(); ++i) {
-        if (!args[i].is_string()) {
-          return {Status::NotOK, "allowed_first_args entries must be strings"};
-        }
-        arg_list.push_back(args[i].as_string());
-      }
-      selector.allowed_first_args[cmd_id.GetValue()] = std::move(arg_list);
     }
   }
 
@@ -266,19 +201,6 @@ jsoncons::json SelectorToJson(const AclSelector &selector) {
     channel_array.push_back(channel);
   }
   json[kJsonFieldChannels] = std::move(channel_array);
-
-  // Serialize allowed_first_args for subcommand filtering
-  if (!selector.allowed_first_args.empty()) {
-    jsoncons::json first_args_obj;
-    for (const auto &[cmd_id, args] : selector.allowed_first_args) {
-      jsoncons::json args_array(jsoncons::json_array_arg);
-      for (const auto &arg : args) {
-        args_array.push_back(arg);
-      }
-      first_args_obj[std::to_string(cmd_id)] = std::move(args_array);
-    }
-    json[kJsonFieldAllowedFirstArgs] = std::move(first_args_obj);
-  }
 
   return json;
 }
@@ -327,14 +249,6 @@ struct CommandToggleAction {
   std::string original;
 };
 
-// Subcommand filter action for +cmd|subcmd syntax
-struct SubcommandAction {
-  bool allow;
-  std::string command;
-  std::string subcommand;
-  std::string original;
-};
-
 struct CategoryToggleAction {
   bool allow;
   bool all;
@@ -361,8 +275,8 @@ struct SelectorAction {
 };
 
 using SetUserAction = std::variant<EnableAction, DisableAction, ResetUserAction, ResetPassAction, NoPassAction,
-                                   PasswordAction, CommandToggleAction, SubcommandAction, CategoryToggleAction,
-                                   KeyPatternAction, ChannelPatternAction, ClearSelectorsAction, SelectorAction>;
+                                   PasswordAction, CommandToggleAction, CategoryToggleAction, KeyPatternAction,
+                                   ChannelPatternAction, ClearSelectorsAction, SelectorAction>;
 
 // Forward declarations for helper functions used by action handlers
 std::vector<uint32_t> BuildAllCategoryBitmap();
@@ -532,69 +446,11 @@ Status ApplyChannelPatternToSelector(redis::AclSelector &selector, const Channel
   return Status::OK();
 }
 
-// Apply SubcommandAction - allow specific first arg of a command (e.g., +SELECT|0)
-Status ApplySubcommandAction(redis::AclUser &user, const SubcommandAction &action) {
-  auto &root = EnsureRootSelector(user);
-  auto &command_manager = redis::AclCommandManager::Instance();
-
-  auto bit = command_manager.GetCommandBit(action.command);
-  if (!bit.has_value()) {
-    return {Status::RedisParseErr, "unknown ACL command: " + action.command};
-  }
-
-  if (action.allow) {
-    // Add the first arg to the allowed list for this command
-    auto &args = root.allowed_first_args[bit.value()];
-    auto lowered_arg = util::ToLower(action.subcommand);
-    if (std::find(args.begin(), args.end(), lowered_arg) == args.end()) {
-      args.push_back(lowered_arg);
-    }
-  } else {
-    // For disallowing, we just disable the whole command (Redis behavior)
-    const size_t index = bit.value() / 64;
-    const uint64_t mask = UINT64_C(1) << (bit.value() % 64);
-    if (root.allowed_commands.size() > index) {
-      root.allowed_commands[index] &= ~mask;
-    }
-    // Also clear any first args for this command
-    root.allowed_first_args.erase(bit.value());
-  }
-  return Status::OK();
-}
-
-Status ApplySubcommandToSelector(redis::AclSelector &selector, const SubcommandAction &action) {
-  auto &command_manager = redis::AclCommandManager::Instance();
-
-  auto bit = command_manager.GetCommandBit(action.command);
-  if (!bit.has_value()) {
-    return {Status::RedisParseErr, "unknown ACL command: " + action.command};
-  }
-
-  if (action.allow) {
-    auto &args = selector.allowed_first_args[bit.value()];
-    auto lowered_arg = util::ToLower(action.subcommand);
-    if (std::find(args.begin(), args.end(), lowered_arg) == args.end()) {
-      args.push_back(lowered_arg);
-    }
-  } else {
-    const size_t index = bit.value() / 64;
-    const uint64_t mask = UINT64_C(1) << (bit.value() % 64);
-    if (selector.allowed_commands.size() > index) {
-      selector.allowed_commands[index] &= ~mask;
-    }
-    selector.allowed_first_args.erase(bit.value());
-  }
-  return Status::OK();
-}
-
 Status ApplyCommandToggleToSelector(redis::AclSelector &selector, const CommandToggleAction &toggle) {
   auto &command_manager = redis::AclCommandManager::Instance();
 
   if (toggle.all) {
     selector.allowed_commands = toggle.allow ? command_manager.BuildBitmapForAllCommands() : std::vector<uint64_t>{};
-    if (!toggle.allow) {
-      selector.allowed_first_args.clear();
-    }
     return Status::OK();
   }
 
@@ -613,7 +469,6 @@ Status ApplyCommandToggleToSelector(redis::AclSelector &selector, const CommandT
     selector.allowed_commands[index] |= mask;
   } else if (selector.allowed_commands.size() > index) {
     selector.allowed_commands[index] &= ~mask;
-    selector.allowed_first_args.erase(bit.value());
   }
   TrimBitmap(selector.allowed_commands);
   return Status::OK();
@@ -628,7 +483,6 @@ Status ApplyCategoryToggleToSelector(redis::AclSelector &selector, const Categor
     } else {
       selector.allowed_commands.clear();
       selector.allowed_category.clear();
-      selector.allowed_first_args.clear();
     }
     return Status::OK();
   }
@@ -702,7 +556,6 @@ Status ApplySelectorAction(redis::AclUser &user, const SelectorAction &action) {
                 return {Status::RedisParseErr, "nested selectors are not allowed"};
               },
               [&](const CommandToggleAction &toggle) { return ApplyCommandToggleToSelector(new_selector, toggle); },
-              [&](const SubcommandAction &sub) { return ApplySubcommandToSelector(new_selector, sub); },
               [&](const CategoryToggleAction &toggle) { return ApplyCategoryToggleToSelector(new_selector, toggle); },
               [&](const KeyPatternAction &pattern) { return ApplyKeyPatternToSelector(new_selector, pattern); },
               [&](const ChannelPatternAction &pattern) {
@@ -751,7 +604,6 @@ Status ApplySetUserAction(redis::AclUser &user, const SetUserAction &action) {
                  },
                  [&](const PasswordAction &pwd) { return ApplyPasswordAction(user, pwd); },
                  [&](const CommandToggleAction &toggle) { return ApplyCommandToggleAction(user, toggle); },
-                 [&](const SubcommandAction &sub) { return ApplySubcommandAction(user, sub); },
                  [&](const CategoryToggleAction &toggle) { return ApplyCategoryToggleAction(user, toggle); },
                  [&](const KeyPatternAction &pattern) { return ApplyKeyPatternAction(user, pattern); },
                  [&](const ChannelPatternAction &pattern) { return ApplyChannelPatternAction(user, pattern); },
@@ -934,20 +786,6 @@ std::string FormatKeyPattern(const AclKeyPattern &kp) {
     result += "W";
   }
   result += "~" + kp.pattern;
-  return result;
-}
-
-std::string BuildSelectorKeysString(const AclSelector &selector) {
-  if (selector.key_patterns.empty()) {
-    return "~*";
-  }
-  std::string result;
-  for (const auto &kp : selector.key_patterns) {
-    if (!result.empty()) {
-      result += " ";
-    }
-    result += FormatKeyPattern(kp);
-  }
   return result;
 }
 
@@ -1158,19 +996,8 @@ Status ParseSetUserToken(const std::string &token, std::vector<SetUserAction> *a
         bool is_all = category == "all";
         actions->emplace_back(CategoryToggleAction{allow, is_all, category, token});
       } else {
-        // Check for subcommand filter syntax: +cmd|subcmd or -cmd|subcmd
-        auto pipe_pos = token.find('|');
-        if (pipe_pos != std::string::npos) {
-          if (pipe_pos == 1 || pipe_pos == token.size() - 1) {
-            return {Status::RedisParseErr, "ACL SETUSER invalid subcommand filter syntax"};
-          }
-          std::string command = util::ToLower(token.substr(1, pipe_pos - 1));
-          std::string subcommand = util::ToLower(token.substr(pipe_pos + 1));
-          actions->emplace_back(SubcommandAction{allow, command, subcommand, token});
-        } else {
-          std::string command = util::ToLower(token.substr(1));
-          actions->emplace_back(CommandToggleAction{allow, false, command, token});
-        }
+        std::string command = util::ToLower(token.substr(1));
+        actions->emplace_back(CommandToggleAction{allow, false, command, token});
       }
       return Status::OK();
     }
