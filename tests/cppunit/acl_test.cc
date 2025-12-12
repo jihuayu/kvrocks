@@ -111,12 +111,12 @@ class AclTest : public TestBase {
 // ============================================================================
 
 TEST_F(AclTest, SetCreatesNewUser) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
   auto user = BuildUser(true, "ns1");
 
   ASSERT_TRUE(acl->Set("alice", user).IsOK());
 
-  const auto &stored = GetAndAssertUser(*acl, "alice");
+  const auto &stored = getAndAssertUser(*acl, "alice");
   EXPECT_TRUE(stored.enabled);
   EXPECT_EQ("ns1", stored.ns);
   ASSERT_EQ(1U, stored.allowed_commands.size());
@@ -124,7 +124,7 @@ TEST_F(AclTest, SetCreatesNewUser) {
 }
 
 TEST_F(AclTest, SetUpdatesExistingUser) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
   auto user = BuildUser(true, "ns2");
   ASSERT_TRUE(acl->Set("bob", user).IsOK());
 
@@ -133,20 +133,20 @@ TEST_F(AclTest, SetUpdatesExistingUser) {
   user.allowed_commands.front().flags = 7;
   ASSERT_TRUE(acl->Set("bob", user).IsOK());
 
-  const auto &stored = GetAndAssertUser(*acl, "bob");
+  const auto &stored = getAndAssertUser(*acl, "bob");
   EXPECT_FALSE(stored.enabled);
   EXPECT_EQ(7U, stored.allowed_commands.front().flags);
 }
 
 TEST_F(AclTest, SetPersistsUsersToStorage) {
   {
-    auto acl = CreateAcl();
+    auto acl = createAcl();
     ASSERT_TRUE(acl->Set("carol", BuildUser(true, "ns3", 1)).IsOK());
   }
 
   // Reload from storage
-  auto reloaded = CreateAcl();
-  const auto &stored = GetAndAssertUser(*reloaded, "carol");
+  auto reloaded = createAcl();
+  const auto &stored = getAndAssertUser(*reloaded, "carol");
   EXPECT_TRUE(stored.enabled);
   EXPECT_EQ("ns3", stored.ns);
   ASSERT_EQ(1U, stored.allowed_commands.size());
@@ -154,7 +154,7 @@ TEST_F(AclTest, SetPersistsUsersToStorage) {
 }
 
 TEST_F(AclTest, DeleteUser) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
   ASSERT_TRUE(acl->Set("tempuser", BuildUser(true, "default")).IsOK());
   ASSERT_TRUE(acl->Get("tempuser").IsOK());
 
@@ -165,7 +165,7 @@ TEST_F(AclTest, DeleteUser) {
 }
 
 TEST_F(AclTest, ListUsers) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
   auto user = BuildUser(true, "default");
 
   ASSERT_TRUE(acl->Set("alice", user).IsOK());
@@ -184,10 +184,10 @@ TEST_F(AclTest, ListUsers) {
 // ============================================================================
 
 TEST_F(AclTest, ReplicatedUpdateRefreshesCache) {
-  auto writer = CreateAcl();
+  auto writer = createAcl();
   ASSERT_TRUE(writer->Set("dave", BuildUser(true, "ns4")).IsOK());
 
-  auto replica = CreateAcl();
+  auto replica = createAcl();
   auto initial_or = replica->Get("dave");
   ASSERT_TRUE(initial_or.IsOK());
   EXPECT_TRUE(initial_or.GetValue().enabled);
@@ -198,16 +198,16 @@ TEST_F(AclTest, ReplicatedUpdateRefreshesCache) {
   auto serialized = updated.ToJson().to_string();
 
   ASSERT_TRUE(replica->ApplyReplicatedUpdate("dave", serialized).IsOK());
-  const auto &refreshed = GetAndAssertUser(*replica, "dave");
+  const auto &refreshed = getAndAssertUser(*replica, "dave");
   EXPECT_FALSE(refreshed.enabled);
   EXPECT_EQ(3U, refreshed.allowed_commands.front().flags);
 }
 
 TEST_F(AclTest, ReplicatedDeletionEvictsCache) {
-  auto writer = CreateAcl();
+  auto writer = createAcl();
   ASSERT_TRUE(writer->Set("erin", BuildUser(true, "ns5")).IsOK());
 
-  auto replica = CreateAcl();
+  auto replica = createAcl();
   ASSERT_TRUE(replica->Get("erin").IsOK());
 
   ASSERT_TRUE(writer->Del("erin").IsOK());
@@ -222,32 +222,32 @@ TEST_F(AclTest, ReplicatedDeletionEvictsCache) {
 // ============================================================================
 
 TEST_F(AclTest, UserEnableDisable) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
 
   // Create disabled user
   ASSERT_TRUE(acl->Set("testuser", BuildUser(false, "default")).IsOK());
-  EXPECT_FALSE(GetAndAssertUser(*acl, "testuser").enabled);
+  EXPECT_FALSE(getAndAssertUser(*acl, "testuser").enabled);
 
   // Enable user
   ASSERT_TRUE(acl->Set("testuser", BuildUser(true, "default")).IsOK());
-  EXPECT_TRUE(GetAndAssertUser(*acl, "testuser").enabled);
+  EXPECT_TRUE(getAndAssertUser(*acl, "testuser").enabled);
 }
 
 TEST_F(AclTest, UserPasswordManagement) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
 
   // User with passwords
   auto user_with_passwords = BuildUserWithPasswords("default", {"hash1", "hash2"});
   ASSERT_TRUE(acl->Set("pwduser", user_with_passwords).IsOK());
 
-  const auto &stored = GetAndAssertUser(*acl, "pwduser");
+  const auto &stored = getAndAssertUser(*acl, "pwduser");
   EXPECT_EQ(2U, stored.passwords.size());
   EXPECT_TRUE(stored.passwords.count("hash1") > 0);
   EXPECT_TRUE(stored.passwords.count("hash2") > 0);
 
   // User with nopass (empty password set)
   ASSERT_TRUE(acl->Set("nopassuser", BuildUser(true, "default")).IsOK());
-  EXPECT_TRUE(GetAndAssertUser(*acl, "nopassuser").passwords.empty());
+  EXPECT_TRUE(getAndAssertUser(*acl, "nopassuser").passwords.empty());
 }
 
 // ============================================================================
@@ -255,11 +255,11 @@ TEST_F(AclTest, UserPasswordManagement) {
 // ============================================================================
 
 TEST_F(AclTest, SelectorKeyPatterns) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
   auto user = BuildUserWithPatterns("default", {"user:*", "session:*", "cache:*"});
   ASSERT_TRUE(acl->Set("patternuser", user).IsOK());
 
-  const auto &stored = GetAndAssertUser(*acl, "patternuser");
+  const auto &stored = getAndAssertUser(*acl, "patternuser");
   ASSERT_EQ(1U, stored.allowed_commands.size());
   const auto &key_patterns = stored.allowed_commands[0].key_patterns;
   EXPECT_EQ(3U, key_patterns.size());
@@ -270,11 +270,11 @@ TEST_F(AclTest, SelectorKeyPatterns) {
 }
 
 TEST_F(AclTest, SelectorChannelPatterns) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
   auto user = BuildUserWithChannels("default", {"news:*", "events:*"});
   ASSERT_TRUE(acl->Set("channeluser", user).IsOK());
 
-  const auto &stored = GetAndAssertUser(*acl, "channeluser");
+  const auto &stored = getAndAssertUser(*acl, "channeluser");
   ASSERT_EQ(1U, stored.allowed_commands.size());
   const auto &channels = stored.allowed_commands[0].channels;
   EXPECT_EQ(2U, channels.size());
@@ -283,7 +283,7 @@ TEST_F(AclTest, SelectorChannelPatterns) {
 }
 
 TEST_F(AclTest, MultipleSelectorsSupport) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
   auto user = BuildUser(true, "default");
 
   // Add second selector
@@ -294,7 +294,7 @@ TEST_F(AclTest, MultipleSelectorsSupport) {
 
   ASSERT_TRUE(acl->Set("multiselect", user).IsOK());
 
-  const auto &stored = GetAndAssertUser(*acl, "multiselect");
+  const auto &stored = getAndAssertUser(*acl, "multiselect");
   EXPECT_EQ(2U, stored.allowed_commands.size());
   EXPECT_EQ(0U, stored.allowed_commands[0].flags);
   EXPECT_EQ(1U, stored.allowed_commands[1].flags);
@@ -344,7 +344,7 @@ TEST_F(AclTest, CommandPermissionBitmap) {
 // ============================================================================
 
 TEST_F(AclTest, UserIndexMapping) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
   ASSERT_TRUE(acl->Set("indexed", BuildUser(true, "default")).IsOK());
 
   // Get user index
@@ -395,7 +395,7 @@ TEST_F(AclTest, UserJsonSerialization) {
 // ============================================================================
 
 TEST_F(AclTest, ConcurrentUserOperations) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
 
   ASSERT_TRUE(acl->Set("concurrent1", BuildUser(true, "ns1")).IsOK());
   ASSERT_TRUE(acl->Set("concurrent2", BuildUser(true, "ns2")).IsOK());
@@ -415,13 +415,13 @@ TEST_F(AclTest, ConcurrentUserOperations) {
 // ============================================================================
 
 TEST_F(AclTest, KeyPatternPermissions) {
-  auto acl = CreateAcl();
+  auto acl = createAcl();
   auto user = BuildUserWithKeyPatterns(
       "default",
       {{"read:*", redis::kAclKeyRead}, {"write:*", redis::kAclKeyWrite}, {"readwrite:*", redis::kAclKeyAll}});
   ASSERT_TRUE(acl->Set("keypermuser", user).IsOK());
 
-  const auto &stored = GetAndAssertUser(*acl, "keypermuser");
+  const auto &stored = getAndAssertUser(*acl, "keypermuser");
   ASSERT_EQ(1U, stored.allowed_commands.size());
   const auto &key_patterns = stored.allowed_commands[0].key_patterns;
   ASSERT_EQ(3U, key_patterns.size());
