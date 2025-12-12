@@ -262,6 +262,164 @@ using SetUserAction = std::variant<EnableAction, DisableAction, ResetUserAction,
                                    PasswordAction, CommandToggleAction, CategoryToggleAction, KeyPatternAction,
                                    ChannelPatternAction, ClearSelectorsAction>;
 
+// Forward declarations for helper functions used by action handlers
+std::vector<uint32_t> BuildAllCategoryBitmap();
+StatusOr<size_t> CategoryIndexByName(std::string_view name);
+void EnsureCategoryBit(std::vector<uint32_t> &bitmap, size_t index);
+redis::AclSelector &EnsureRootSelector(redis::AclUser &user);
+void ResetUserState(redis::AclUser &user);
+void TrimCommandBitmap(std::vector<uint64_t> &bitmap);
+void TrimCategoryBitmap(std::vector<uint32_t> &bitmap);
+
+// Action application functions - extracted for better readability and testability
+Status ApplyPasswordAction(redis::AclUser &user, const PasswordAction &action) {
+  switch (action.kind) {
+    case PasswordAction::Kind::kAddPlain: {
+      auto digest = util::Sha256Hex(action.value);
+      user.passwords.insert(digest);
+      break;
+    }
+    case PasswordAction::Kind::kRemovePlain: {
+      auto digest = util::Sha256Hex(action.value);
+      user.passwords.erase(digest);
+      break;
+    }
+    case PasswordAction::Kind::kAddHashed:
+      user.passwords.insert(util::ToLower(action.value));
+      break;
+    case PasswordAction::Kind::kRemoveHashed:
+      user.passwords.erase(util::ToLower(action.value));
+      break;
+  }
+  return Status::OK();
+}
+
+Status ApplyCommandToggleAction(redis::AclUser &user, const CommandToggleAction &toggle) {
+  auto &root = EnsureRootSelector(user);
+  auto &command_manager = redis::AclCommandManager::Instance();
+
+  if (toggle.all) {
+    root.allowed_commands = toggle.allow ? command_manager.BuildBitmapForAllCommands() : std::vector<uint64_t>{};
+    return Status::OK();
+  }
+
+  auto bit = command_manager.GetCommandBit(toggle.command);
+  if (!bit.has_value()) {
+    return {Status::RedisParseErr, "unknown ACL command modifier: " + toggle.original};
+  }
+
+  const size_t index = bit.value() / 64;
+  const uint64_t mask = UINT64_C(1) << (bit.value() % 64);
+
+  if (toggle.allow) {
+    if (root.allowed_commands.size() <= index) {
+      root.allowed_commands.resize(index + 1, 0);
+    }
+    root.allowed_commands[index] |= mask;
+  } else if (root.allowed_commands.size() > index) {
+    root.allowed_commands[index] &= ~mask;
+    TrimCommandBitmap(root.allowed_commands);
+  }
+  return Status::OK();
+}
+
+Status ApplyCategoryToggleAction(redis::AclUser &user, const CategoryToggleAction &toggle) {
+  auto &root = EnsureRootSelector(user);
+
+  if (toggle.all) {
+    root.allowed_category = toggle.allow ? BuildAllCategoryBitmap() : std::vector<uint32_t>{};
+    return Status::OK();
+  }
+
+  auto idx_or = CategoryIndexByName(toggle.category);
+  if (!idx_or.IsOK()) {
+    return idx_or.ToStatus();
+  }
+
+  auto index = idx_or.GetValue();
+  EnsureCategoryBit(root.allowed_category, index);
+
+  const size_t chunk = index / 32;
+  const uint32_t mask = 1U << (index % 32);
+
+  if (toggle.allow) {
+    root.allowed_category[chunk] |= mask;
+  } else {
+    root.allowed_category[chunk] &= ~mask;
+    TrimCategoryBitmap(root.allowed_category);
+  }
+  return Status::OK();
+}
+
+Status ApplyKeyPatternAction(redis::AclUser &user, const KeyPatternAction &action) {
+  auto &root = EnsureRootSelector(user);
+  switch (action.kind) {
+    case KeyPatternAction::Kind::kReset:
+    case KeyPatternAction::Kind::kAll:
+      root.patterns.clear();
+      break;
+    case KeyPatternAction::Kind::kAdd:
+      if (std::find(root.patterns.begin(), root.patterns.end(), action.pattern) == root.patterns.end()) {
+        root.patterns.emplace_back(action.pattern);
+      }
+      break;
+  }
+  return Status::OK();
+}
+
+Status ApplyChannelPatternAction(redis::AclUser &user, const ChannelPatternAction &action) {
+  auto &root = EnsureRootSelector(user);
+  switch (action.kind) {
+    case ChannelPatternAction::Kind::kReset:
+    case ChannelPatternAction::Kind::kAll:
+      root.channels.clear();
+      break;
+    case ChannelPatternAction::Kind::kAdd:
+      if (std::find(root.channels.begin(), root.channels.end(), action.pattern) == root.channels.end()) {
+        root.channels.emplace_back(action.pattern);
+      }
+      break;
+  }
+  return Status::OK();
+}
+
+// Unified action visitor for applying SetUserAction to AclUser
+Status ApplySetUserAction(redis::AclUser &user, const SetUserAction &action) {
+  return std::visit(
+      Overloaded{[&](const EnableAction &) -> Status {
+                   user.enabled = true;
+                   return Status::OK();
+                 },
+                 [&](const DisableAction &) -> Status {
+                   user.enabled = false;
+                   return Status::OK();
+                 },
+                 [&](const ResetUserAction &) -> Status {
+                   ResetUserState(user);
+                   return Status::OK();
+                 },
+                 [&](const ResetPassAction &) -> Status {
+                   user.passwords.clear();
+                   return Status::OK();
+                 },
+                 [&](const NoPassAction &) -> Status {
+                   user.passwords.clear();
+                   return Status::OK();
+                 },
+                 [&](const ClearSelectorsAction &) -> Status {
+                   if (user.allowed_commands.size() > 1) {
+                     user.allowed_commands.erase(user.allowed_commands.begin() + 1, user.allowed_commands.end());
+                   }
+                   return Status::OK();
+                 },
+                 [&](const PasswordAction &pwd) { return ApplyPasswordAction(user, pwd); },
+                 [&](const CommandToggleAction &toggle) { return ApplyCommandToggleAction(user, toggle); },
+                 [&](const CategoryToggleAction &toggle) { return ApplyCategoryToggleAction(user, toggle); },
+                 [&](const KeyPatternAction &pattern) { return ApplyKeyPatternAction(user, pattern); },
+                 [&](const ChannelPatternAction &pattern) { return ApplyChannelPatternAction(user, pattern); }},
+      action);
+}
+
 bool IsValidSha256Hex(std::string_view value) {
   if (value.size() != 64) {
     return false;
@@ -292,29 +450,29 @@ redis::AclSelector &EnsureRootSelector(redis::AclUser &user) {
   return user.allowed_commands.front();
 }
 
-void TrimCommandBitmap(std::vector<uint64_t> &bitmap) {
+// Generic template for trimming trailing zeros from a bitmap vector
+template <typename T>
+void TrimBitmap(std::vector<T> &bitmap) {
   while (!bitmap.empty() && bitmap.back() == 0) {
     bitmap.pop_back();
   }
 }
 
-void TrimCategoryBitmap(std::vector<uint32_t> &bitmap) {
-  while (!bitmap.empty() && bitmap.back() == 0) {
-    bitmap.pop_back();
-  }
-}
-
-std::vector<uint64_t> NormalizeCommandBitmap(const std::vector<uint64_t> &bitmap) {
+// Generic template for normalizing a bitmap (copy + trim)
+template <typename T>
+std::vector<T> NormalizeBitmap(const std::vector<T> &bitmap) {
   auto normalized = bitmap;
-  while (!normalized.empty() && normalized.back() == 0) {
-    normalized.pop_back();
-  }
+  TrimBitmap(normalized);
   return normalized;
 }
 
+// Type aliases for clarity
+inline void TrimCommandBitmap(std::vector<uint64_t> &bitmap) { TrimBitmap(bitmap); }
+inline void TrimCategoryBitmap(std::vector<uint32_t> &bitmap) { TrimBitmap(bitmap); }
+
 bool CommandBitmapIsAll(const std::vector<uint64_t> &bitmap) {
-  auto normalized = NormalizeCommandBitmap(bitmap);
-  auto all_bitmap = NormalizeCommandBitmap(AclCommandManager::Instance().BuildBitmapForAllCommands());
+  auto normalized = NormalizeBitmap(bitmap);
+  auto all_bitmap = NormalizeBitmap(AclCommandManager::Instance().BuildBitmapForAllCommands());
   if (normalized.empty() || all_bitmap.empty()) {
     return false;
   }
@@ -322,12 +480,12 @@ bool CommandBitmapIsAll(const std::vector<uint64_t> &bitmap) {
 }
 
 std::vector<std::string> BuildCommandRules(const std::vector<uint64_t> &bitmap) {
-  auto normalized = NormalizeCommandBitmap(bitmap);
+  auto normalized = NormalizeBitmap(bitmap);
   if (normalized.empty()) {
     return {"-@all"};
   }
 
-  auto all_bitmap = NormalizeCommandBitmap(AclCommandManager::Instance().BuildBitmapForAllCommands());
+  auto all_bitmap = NormalizeBitmap(AclCommandManager::Instance().BuildBitmapForAllCommands());
   if (!all_bitmap.empty() && normalized == all_bitmap) {
     return {"+@all"};
   }
@@ -341,13 +499,7 @@ std::vector<std::string> BuildCommandRules(const std::vector<uint64_t> &bitmap) 
   return result;
 }
 
-std::vector<uint32_t> NormalizeCategoryBitmap(const std::vector<uint32_t> &bitmap) {
-  auto normalized = bitmap;
-  while (!normalized.empty() && normalized.back() == 0) {
-    normalized.pop_back();
-  }
-  return normalized;
-}
+std::vector<uint32_t> BuildAllCategoryBitmap();
 
 const std::vector<std::string_view> &AclCategoryNames() {
   static const std::vector<std::string_view> names = {
@@ -373,13 +525,13 @@ std::vector<uint32_t> BuildAllCategoryBitmap() {
 }
 
 std::vector<std::string> BuildCategoryRules(const std::vector<uint32_t> &bitmap) {
-  auto normalized = NormalizeCategoryBitmap(bitmap);
+  auto normalized = NormalizeBitmap(bitmap);
   std::vector<std::string> result;
   if (normalized.empty()) {
     return result;
   }
 
-  auto all_bitmap = NormalizeCategoryBitmap(BuildAllCategoryBitmap());
+  auto all_bitmap = NormalizeBitmap(BuildAllCategoryBitmap());
   if (!all_bitmap.empty() && normalized == all_bitmap) {
     result.emplace_back("+@all");
     return result;
@@ -1129,152 +1281,9 @@ Status Acl::HandleSetUser(Namespace *ns_mgr, const std::string &username, const 
     user.ns = user_or.Is<Status::NotFound>() ? user_namespace : user.ns;
   }
 
-  auto apply_password = [&](const PasswordAction &action) -> Status {
-    switch (action.kind) {
-      case PasswordAction::Kind::kAddPlain: {
-        auto digest = util::Sha256Hex(action.value);
-        user.passwords.insert(digest);
-        break;
-      }
-      case PasswordAction::Kind::kRemovePlain: {
-        auto digest = util::Sha256Hex(action.value);
-        user.passwords.erase(digest);
-        break;
-      }
-      case PasswordAction::Kind::kAddHashed: {
-        user.passwords.insert(util::ToLower(action.value));
-        break;
-      }
-      case PasswordAction::Kind::kRemoveHashed: {
-        user.passwords.erase(util::ToLower(action.value));
-        break;
-      }
-    }
-    return Status::OK();
-  };
-
-  auto apply_command_toggle = [&](const CommandToggleAction &toggle) -> Status {
-    auto &root = EnsureRootSelector(user);
-    auto &command_manager = AclCommandManager::Instance();
-    if (toggle.all) {
-      if (toggle.allow) {
-        root.allowed_commands = command_manager.BuildBitmapForAllCommands();
-      } else {
-        root.allowed_commands.clear();
-      }
-      return Status::OK();
-    }
-    auto bit = command_manager.GetCommandBit(toggle.command);
-    if (!bit.has_value()) {
-      return {Status::RedisParseErr, "unknown ACL command modifier: " + toggle.original};
-    }
-    const size_t index = bit.value() / 64;
-    const uint64_t mask = (UINT64_C(1) << (bit.value() % 64));
-    if (toggle.allow) {
-      if (root.allowed_commands.size() <= index) {
-        root.allowed_commands.resize(index + 1, 0);
-      }
-      root.allowed_commands[index] |= mask;
-    } else if (root.allowed_commands.size() > index) {
-      root.allowed_commands[index] &= ~mask;
-      TrimCommandBitmap(root.allowed_commands);
-    }
-    return Status::OK();
-  };
-
-  auto apply_category_toggle = [&](const CategoryToggleAction &toggle) -> Status {
-    auto &root = EnsureRootSelector(user);
-    if (toggle.all) {
-      if (toggle.allow) {
-        root.allowed_category = BuildAllCategoryBitmap();
-      } else {
-        root.allowed_category.clear();
-      }
-      return Status::OK();
-    }
-    auto idx_or = CategoryIndexByName(toggle.category);
-    if (!idx_or.IsOK()) {
-      return idx_or.ToStatus();
-    }
-    auto index = idx_or.GetValue();
-    EnsureCategoryBit(root.allowed_category, index);
-    const size_t chunk = index / 32;
-    const uint32_t mask = 1U << (index % 32);
-    if (toggle.allow) {
-      root.allowed_category[chunk] |= mask;
-    } else {
-      root.allowed_category[chunk] &= ~mask;
-      TrimCategoryBitmap(root.allowed_category);
-    }
-    return Status::OK();
-  };
-
-  auto apply_key_pattern = [&](const KeyPatternAction &action) -> Status {
-    auto &root = EnsureRootSelector(user);
-    switch (action.kind) {
-      case KeyPatternAction::Kind::kReset:
-      case KeyPatternAction::Kind::kAll:
-        root.patterns.clear();
-        break;
-      case KeyPatternAction::Kind::kAdd:
-        if (std::find(root.patterns.begin(), root.patterns.end(), action.pattern) == root.patterns.end()) {
-          root.patterns.emplace_back(action.pattern);
-        }
-        break;
-    }
-    return Status::OK();
-  };
-
-  auto apply_channel_pattern = [&](const ChannelPatternAction &action) -> Status {
-    auto &root = EnsureRootSelector(user);
-    switch (action.kind) {
-      case ChannelPatternAction::Kind::kReset:
-      case ChannelPatternAction::Kind::kAll:
-        root.channels.clear();
-        break;
-      case ChannelPatternAction::Kind::kAdd:
-        if (std::find(root.channels.begin(), root.channels.end(), action.pattern) == root.channels.end()) {
-          root.channels.emplace_back(action.pattern);
-        }
-        break;
-    }
-    return Status::OK();
-  };
-
+  // Apply all actions using the unified visitor
   for (const auto &action : actions) {
-    auto status = std::visit(
-        Overloaded{[&](const EnableAction &) -> Status {
-                     user.enabled = true;
-                     return Status::OK();
-                   },
-                   [&](const DisableAction &) -> Status {
-                     user.enabled = false;
-                     return Status::OK();
-                   },
-                   [&](const ResetUserAction &) -> Status {
-                     ResetUserState(user);
-                     return Status::OK();
-                   },
-                   [&](const ResetPassAction &) -> Status {
-                     user.passwords.clear();
-                     return Status::OK();
-                   },
-                   [&](const NoPassAction &) -> Status {
-                     user.passwords.clear();
-                     return Status::OK();
-                   },
-                   [&](const ClearSelectorsAction &) -> Status {
-                     if (user.allowed_commands.size() > 1) {
-                       user.allowed_commands.erase(user.allowed_commands.begin() + 1, user.allowed_commands.end());
-                     }
-                     return Status::OK();
-                   },
-                   [&](const PasswordAction &pwd) { return apply_password(pwd); },
-                   [&](const CommandToggleAction &toggle) { return apply_command_toggle(toggle); },
-                   [&](const CategoryToggleAction &toggle) { return apply_category_toggle(toggle); },
-                   [&](const KeyPatternAction &pattern) { return apply_key_pattern(pattern); },
-                   [&](const ChannelPatternAction &pattern) { return apply_channel_pattern(pattern); }},
-        action);
+    auto status = ApplySetUserAction(user, action);
     if (!status.IsOK()) {
       return status;
     }
