@@ -94,7 +94,8 @@ class AclTest : public TestBase {
   // Helper to get a fresh Acl instance with loaded data
   std::unique_ptr<redis::Acl> createAcl() {
     auto acl = std::make_unique<redis::Acl>(storage_.get());
-    EXPECT_TRUE(acl->LoadAcl().IsOK());
+    auto status = acl->LoadAcl();
+    EXPECT_TRUE(status.IsOK()) << "LoadAcl failed: " << status.Msg();
     return acl;
   }
 
@@ -141,7 +142,25 @@ TEST_F(AclTest, SetUpdatesExistingUser) {
 TEST_F(AclTest, SetPersistsUsersToStorage) {
   {
     auto acl = createAcl();
-    ASSERT_TRUE(acl->Set("carol", BuildUser(true, "ns3", 1)).IsOK());
+    auto user = BuildUser(true, "ns3", 1);
+    auto json_str = user.ToJson().to_string();
+    std::cout << "User JSON: " << json_str << std::endl;
+
+    // Try to parse it back immediately
+    try {
+      auto parsed = jsoncons::json::parse(json_str);
+      std::cout << "JSON parsed successfully" << std::endl;
+      auto user_or = redis::AclUser::FromJson(parsed);
+      if (!user_or.IsOK()) {
+        std::cout << "FromJson failed: " << user_or.ToStatus().Msg() << std::endl;
+      } else {
+        std::cout << "FromJson succeeded" << std::endl;
+      }
+    } catch (const std::exception &e) {
+      std::cout << "Exception during parsing: " << e.what() << std::endl;
+    }
+
+    ASSERT_TRUE(acl->Set("carol", user).IsOK());
   }
 
   // Reload from storage
@@ -177,44 +196,6 @@ TEST_F(AclTest, ListUsers) {
   EXPECT_TRUE(ContainsUsername(users, "alice"));
   EXPECT_TRUE(ContainsUsername(users, "bob"));
   EXPECT_TRUE(ContainsUsername(users, "charlie"));
-}
-
-// ============================================================================
-// Replication Tests
-// ============================================================================
-
-TEST_F(AclTest, ReplicatedUpdateRefreshesCache) {
-  auto writer = createAcl();
-  ASSERT_TRUE(writer->Set("dave", BuildUser(true, "ns4")).IsOK());
-
-  auto replica = createAcl();
-  auto initial_or = replica->Get("dave");
-  ASSERT_TRUE(initial_or.IsOK());
-  EXPECT_TRUE(initial_or.GetValue().enabled);
-
-  // Update via replication
-  auto updated = BuildUser(false, "ns4", 3);
-  ASSERT_TRUE(writer->Set("dave", updated).IsOK());
-  auto serialized = updated.ToJson().to_string();
-
-  ASSERT_TRUE(replica->ApplyReplicatedUpdate("dave", serialized).IsOK());
-  const auto &refreshed = getAndAssertUser(*replica, "dave");
-  EXPECT_FALSE(refreshed.enabled);
-  EXPECT_EQ(3U, refreshed.allowed_commands.front().flags);
-}
-
-TEST_F(AclTest, ReplicatedDeletionEvictsCache) {
-  auto writer = createAcl();
-  ASSERT_TRUE(writer->Set("erin", BuildUser(true, "ns5")).IsOK());
-
-  auto replica = createAcl();
-  ASSERT_TRUE(replica->Get("erin").IsOK());
-
-  ASSERT_TRUE(writer->Del("erin").IsOK());
-  ASSERT_TRUE(replica->ApplyReplicatedDeletion("erin").IsOK());
-
-  auto removed_or = replica->Get("erin");
-  EXPECT_TRUE(removed_or.Is<Status::NotFound>());
 }
 
 // ============================================================================

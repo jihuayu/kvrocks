@@ -141,8 +141,6 @@ class Acl {
   Status Set(const std::string &username, const AclUser &user);
   Status Del(const std::string &username);
   Status LoadAcl();
-  Status ApplyReplicatedUpdate(const std::string &username, std::string_view serialized_user);
-  Status ApplyReplicatedDeletion(const std::string &username);
   std::optional<size_t> GetUserIndex(const std::string &username);
   std::shared_ptr<const AclUser> GetCachedUserByIndex(size_t index);
   std::vector<std::string> ListUsers() const;

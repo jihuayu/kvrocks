@@ -346,9 +346,12 @@ class Server {
   Namespace *GetNamespace() { return &namespace_; }
   redis::Acl *GetAcl() { return &acl_; }
 
+  // AuthenticateUser for ACL User
   AuthResult AuthenticateUser(const std::string &username, const std::string &password, std::string *ns,
                               std::shared_ptr<const redis::AclUser> *acl_user = nullptr,
                               size_t *acl_user_index = nullptr);
+
+  // AuthenticateUser for common User
   AuthResult AuthenticateUser(const std::string &user_password, std::string *ns,
                               std::shared_ptr<const redis::AclUser> *acl_user = nullptr,
                               size_t *acl_user_index = nullptr);

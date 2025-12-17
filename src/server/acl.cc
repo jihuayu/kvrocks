@@ -280,12 +280,9 @@ using SetUserAction = std::variant<EnableAction, DisableAction, ResetUserAction,
 
 // Forward declarations for helper functions used by action handlers
 std::vector<uint32_t> BuildAllCategoryBitmap();
-StatusOr<size_t> CategoryIndexByName(std::string_view name);
-void EnsureCategoryBit(std::vector<uint32_t> &bitmap, size_t index);
 redis::AclSelector &EnsureRootSelector(redis::AclUser &user);
 void ResetUserState(redis::AclUser &user);
 void TrimCommandBitmap(std::vector<uint64_t> &bitmap);
-void TrimCategoryBitmap(std::vector<uint32_t> &bitmap);
 
 // Action application functions - extracted for better readability and testability
 Status ApplyPasswordAction(redis::AclUser &user, const PasswordAction &action) {
@@ -340,173 +337,21 @@ Status ApplyCommandToggleAction(redis::AclUser &user, const CommandToggleAction 
 }
 
 Status ApplyCategoryToggleAction(redis::AclUser &user, const CategoryToggleAction &toggle) {
-  auto &root = EnsureRootSelector(user);
-
-  if (toggle.all) {
-    root.allowed_category = toggle.allow ? BuildAllCategoryBitmap() : std::vector<uint32_t>{};
-    return Status::OK();
-  }
-
-  auto idx_or = CategoryIndexByName(toggle.category);
-  if (!idx_or.IsOK()) {
-    return idx_or.ToStatus();
-  }
-
-  auto index = idx_or.GetValue();
-  EnsureCategoryBit(root.allowed_category, index);
-
-  const size_t chunk = index / 32;
-  const uint32_t mask = 1U << (index % 32);
-
-  if (toggle.allow) {
-    root.allowed_category[chunk] |= mask;
-  } else {
-    root.allowed_category[chunk] &= ~mask;
-    TrimCategoryBitmap(root.allowed_category);
-  }
-  return Status::OK();
+  (void)user;
+  (void)toggle;
+  return {Status::NotSupported, "category is not supported now"};
 }
 
 Status ApplyKeyPatternAction(redis::AclUser &user, const KeyPatternAction &action) {
-  auto &root = EnsureRootSelector(user);
-  switch (action.kind) {
-    case KeyPatternAction::Kind::kReset:
-      root.key_patterns.clear();
-      break;
-    case KeyPatternAction::Kind::kAll:
-      root.key_patterns.clear();
-      // Note: allkeys means no patterns specified, access to all keys is implied
-      break;
-    case KeyPatternAction::Kind::kAdd: {
-      // Check if pattern already exists with same or different permissions
-      auto it = std::find_if(root.key_patterns.begin(), root.key_patterns.end(),
-                             [&](const AclKeyPattern &kp) { return kp.pattern == action.pattern; });
-      if (it != root.key_patterns.end()) {
-        // Merge permissions: if adding RW to existing R, result is RW
-        it->flags |= action.flags;
-      } else {
-        root.key_patterns.emplace_back(action.pattern, action.flags);
-      }
-      break;
-    }
-  }
-  return Status::OK();
-}
-
-Status ApplyKeyPatternToSelector(redis::AclSelector &selector, const KeyPatternAction &action) {
-  switch (action.kind) {
-    case KeyPatternAction::Kind::kReset:
-      selector.key_patterns.clear();
-      break;
-    case KeyPatternAction::Kind::kAll:
-      selector.key_patterns.clear();
-      break;
-    case KeyPatternAction::Kind::kAdd: {
-      auto it = std::find_if(selector.key_patterns.begin(), selector.key_patterns.end(),
-                             [&](const AclKeyPattern &kp) { return kp.pattern == action.pattern; });
-      if (it != selector.key_patterns.end()) {
-        it->flags |= action.flags;
-      } else {
-        selector.key_patterns.emplace_back(action.pattern, action.flags);
-      }
-      break;
-    }
-  }
-  return Status::OK();
+  (void)user;
+  (void)action;
+  return {Status::NotSupported, "key pattern is not supported now"};
 }
 
 Status ApplyChannelPatternAction(redis::AclUser &user, const ChannelPatternAction &action) {
-  auto &root = EnsureRootSelector(user);
-  switch (action.kind) {
-    case ChannelPatternAction::Kind::kReset:
-    case ChannelPatternAction::Kind::kAll:
-      root.channels.clear();
-      break;
-    case ChannelPatternAction::Kind::kAdd:
-      if (std::find(root.channels.begin(), root.channels.end(), action.pattern) == root.channels.end()) {
-        root.channels.emplace_back(action.pattern);
-      }
-      break;
-  }
-  return Status::OK();
-}
-
-Status ApplyChannelPatternToSelector(redis::AclSelector &selector, const ChannelPatternAction &action) {
-  switch (action.kind) {
-    case ChannelPatternAction::Kind::kReset:
-    case ChannelPatternAction::Kind::kAll:
-      selector.channels.clear();
-      break;
-    case ChannelPatternAction::Kind::kAdd:
-      if (std::find(selector.channels.begin(), selector.channels.end(), action.pattern) == selector.channels.end()) {
-        selector.channels.emplace_back(action.pattern);
-      }
-      break;
-  }
-  return Status::OK();
-}
-
-Status ApplyCommandToggleToSelector(redis::AclSelector &selector, const CommandToggleAction &toggle) {
-  auto &command_manager = redis::AclCommandManager::Instance();
-
-  if (toggle.all) {
-    selector.allowed_commands = toggle.allow ? command_manager.BuildBitmapForAllCommands() : std::vector<uint64_t>{};
-    return Status::OK();
-  }
-
-  auto bit = command_manager.GetCommandBit(toggle.command);
-  if (!bit.has_value()) {
-    return {Status::RedisParseErr, "unknown ACL command modifier: " + toggle.original};
-  }
-
-  const size_t index = bit.value() / 64;
-  const uint64_t mask = UINT64_C(1) << (bit.value() % 64);
-
-  if (toggle.allow) {
-    if (selector.allowed_commands.size() <= index) {
-      selector.allowed_commands.resize(index + 1, 0);
-    }
-    selector.allowed_commands[index] |= mask;
-  } else if (selector.allowed_commands.size() > index) {
-    selector.allowed_commands[index] &= ~mask;
-  }
-  TrimBitmap(selector.allowed_commands);
-  return Status::OK();
-}
-
-Status ApplyCategoryToggleToSelector(redis::AclSelector &selector, const CategoryToggleAction &toggle) {
-  if (toggle.all) {
-    if (toggle.allow) {
-      auto &command_manager = redis::AclCommandManager::Instance();
-      selector.allowed_commands = command_manager.BuildBitmapForAllCommands();
-      selector.allowed_category = BuildAllCategoryBitmap();
-    } else {
-      selector.allowed_commands.clear();
-      selector.allowed_category.clear();
-    }
-    return Status::OK();
-  }
-
-  auto index_or = CategoryIndexByName(toggle.category);
-  if (!index_or.IsOK()) {
-    return {Status::RedisParseErr, "unknown ACL category modifier: " + toggle.original};
-  }
-  size_t index = index_or.GetValue();
-
-  if (toggle.allow) {
-    EnsureCategoryBit(selector.allowed_category, index);
-    const size_t chunk = index / 32;
-    const uint32_t bit = UINT32_C(1) << (index % 32);
-    selector.allowed_category[chunk] |= bit;
-  } else if (!selector.allowed_category.empty()) {
-    const size_t chunk = index / 32;
-    if (chunk < selector.allowed_category.size()) {
-      const uint32_t bit = UINT32_C(1) << (index % 32);
-      selector.allowed_category[chunk] &= ~bit;
-    }
-    TrimBitmap(selector.allowed_category);
-  }
-  return Status::OK();
+  (void)user;
+  (void)action;
+  return {Status::NotSupported, "channel pattern is not supported now"};
 }
 
 // Forward declaration for ParseSetUserToken
@@ -514,63 +359,9 @@ Status ParseSetUserToken(const std::string &token, std::vector<SetUserAction> *a
 
 // Apply a SelectorAction by parsing tokens and applying them to a new selector
 Status ApplySelectorAction(redis::AclUser &user, const SelectorAction &action) {
-  // Create a new selector with default (no permissions) state
-  redis::AclSelector new_selector{};
-  new_selector.flags = 0;
-
-  // Parse and apply each token to the new selector
-  for (const auto &token : action.tokens) {
-    std::vector<SetUserAction> actions;
-    auto s = ParseSetUserToken(token, &actions);
-    if (!s.IsOK()) {
-      return s.Prefixed("in selector");
-    }
-
-    for (const auto &act : actions) {
-      // Apply action to the new selector (not the root selector)
-      auto result = std::visit(
-          Overloaded{
-              [&](const EnableAction &) -> Status {
-                // on/off don't apply to selectors
-                return {Status::RedisParseErr, "'on'/'off' is not allowed in selector definition"};
-              },
-              [&](const DisableAction &) -> Status {
-                return {Status::RedisParseErr, "'on'/'off' is not allowed in selector definition"};
-              },
-              [&](const ResetUserAction &) -> Status {
-                return {Status::RedisParseErr, "'reset' is not allowed in selector definition"};
-              },
-              [&](const ResetPassAction &) -> Status {
-                return {Status::RedisParseErr, "'resetpass' is not allowed in selector definition"};
-              },
-              [&](const NoPassAction &) -> Status {
-                return {Status::RedisParseErr, "'nopass' is not allowed in selector definition"};
-              },
-              [&](const ClearSelectorsAction &) -> Status {
-                return {Status::RedisParseErr, "'clearselectors' is not allowed in selector definition"};
-              },
-              [&](const PasswordAction &) -> Status {
-                return {Status::RedisParseErr, "password modifiers are not allowed in selector definition"};
-              },
-              [&](const SelectorAction &) -> Status {
-                return {Status::RedisParseErr, "nested selectors are not allowed"};
-              },
-              [&](const CommandToggleAction &toggle) { return ApplyCommandToggleToSelector(new_selector, toggle); },
-              [&](const CategoryToggleAction &toggle) { return ApplyCategoryToggleToSelector(new_selector, toggle); },
-              [&](const KeyPatternAction &pattern) { return ApplyKeyPatternToSelector(new_selector, pattern); },
-              [&](const ChannelPatternAction &pattern) {
-                return ApplyChannelPatternToSelector(new_selector, pattern);
-              }},
-          act);
-      if (!result.IsOK()) {
-        return result;
-      }
-    }
-  }
-
-  // Add the new selector to the user's selector list
-  user.allowed_commands.push_back(std::move(new_selector));
-  return Status::OK();
+  (void)user;
+  (void)action;
+  return {Status::NotSupported, "selector is not supported now"};
 }
 
 // Unified action visitor for applying SetUserAction to AclUser
@@ -643,7 +434,6 @@ redis::AclSelector &EnsureRootSelector(redis::AclUser &user) {
 
 // Type aliases for clarity
 inline void TrimCommandBitmap(std::vector<uint64_t> &bitmap) { TrimBitmap(bitmap); }
-inline void TrimCategoryBitmap(std::vector<uint32_t> &bitmap) { TrimBitmap(bitmap); }
 
 bool CommandBitmapIsAll(const std::vector<uint64_t> &bitmap) {
   auto normalized = NormalizeBitmap(bitmap);
@@ -726,37 +516,6 @@ std::vector<std::string> BuildCategoryRules(const std::vector<uint32_t> &bitmap)
   }
 
   return result;
-}
-
-StatusOr<size_t> CategoryIndexByName(std::string_view name) {
-  const auto &names = AclCategoryNames();
-  std::string lowered = util::ToLower(std::string{name});
-  for (size_t idx = 0; idx < names.size(); ++idx) {
-    std::string candidate = std::string(names[idx]);
-    if (!candidate.empty() && candidate.front() == '@') {
-      candidate.erase(candidate.begin());
-    }
-    if (util::ToLower(candidate) == lowered) {
-      return idx;
-    }
-  }
-
-  const std::string prefix = "category";
-  if (lowered.rfind(prefix, 0) == 0 && lowered.size() > prefix.size()) {
-    auto numeric = ParseInt<size_t>(lowered.substr(prefix.size()), 10);
-    if (numeric.IsOK()) {
-      return numeric.GetValue();
-    }
-  }
-
-  return Status{Status::RedisParseErr, fmt::format("unknown ACL category: {}", name)};
-}
-
-void EnsureCategoryBit(std::vector<uint32_t> &bitmap, size_t index) {
-  const size_t chunk = index / 32;
-  if (bitmap.size() <= chunk) {
-    bitmap.resize(chunk + 1, 0);
-  }
 }
 
 std::vector<std::string> BuildSelectorFlags(const AclSelector &selector) {
@@ -1431,40 +1190,6 @@ Status Acl::LoadAcl() {
   }
 
   user_manager_ = std::move(new_manager);
-  return Status::OK();
-}
-
-Status Acl::ApplyReplicatedUpdate(const std::string &username, std::string_view serialized_user) {
-  if (!user_manager_) {
-    user_manager_ = std::make_unique<AclUserManager>();
-  }
-  jsoncons::json parsed;
-  try {
-    parsed = jsoncons::json::parse(serialized_user);
-  } catch (const std::exception &e) {
-    return {Status::NotOK, std::string("failed to parse ACL user JSON: ") + e.what()};
-  }
-
-  auto user_or = AclUser::FromJson(parsed);
-  if (!user_or.IsOK()) {
-    return user_or.ToStatus();
-  }
-
-  auto entry = std::make_shared<const AclUser>(user_or.GetValue());
-  if (!user_manager_->SetUser(username, entry)) {
-    return {Status::NotOK, "maximum number of ACL users reached"};
-  }
-
-  return Status::OK();
-}
-
-Status Acl::ApplyReplicatedDeletion(const std::string &username) {
-  if (!user_manager_) {
-    user_manager_ = std::make_unique<AclUserManager>();
-  }
-  if (!user_manager_->DeleteUser(username)) {
-    return Status::OK();
-  }
   return Status::OK();
 }
 
