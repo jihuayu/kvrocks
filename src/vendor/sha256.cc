@@ -147,3 +147,15 @@ std::string Sha256Hex(std::string_view input) {
   }
   return result;
 }
+
+bool IsValidSha256Hex(std::string_view value) {
+  if (value.size() != 64) {
+    return false;
+  }
+  for (char ch : value) {
+    if (!std::isxdigit(static_cast<unsigned char>(ch))) {
+      return false;
+    }
+  }
+  return true;
+}

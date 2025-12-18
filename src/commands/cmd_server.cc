@@ -33,7 +33,6 @@
 #include "common/io_util.h"
 #include "common/parse_util.h"
 #include "common/rdb_stream.h"
-#include "common/sha256.h"
 #include "common/string_util.h"
 #include "common/time_util.h"
 #include "config/config.h"
@@ -43,6 +42,7 @@
 #include "server/server.h"
 #include "stats/disk_stats.h"
 #include "storage/rdb/rdb.h"
+#include "vendor/sha256.h"
 
 namespace redis {
 

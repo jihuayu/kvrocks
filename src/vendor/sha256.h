@@ -33,3 +33,5 @@ void SHA256_Update(SHA256_CTX *ctx, const unsigned char *data, std::size_t len);
 void SHA256_Final(unsigned char hash[32], SHA256_CTX *ctx);
 
 std::string Sha256Hex(std::string_view input);
+
+bool IsValidSha256Hex(std::string_view value);
