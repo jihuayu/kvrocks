@@ -34,13 +34,13 @@
 #include "common/db_util.h"
 #include "common/logging.h"
 #include "common/parse_util.h"
-#include "common/sha256.h"
 #include "common/status.h"
 #include "common/string_util.h"
 #include "config/config.h"
 #include "server/namespace.h"
 #include "server/redis_connection.h"
 #include "server/redis_reply.h"
+#include "vendor/sha256.h"
 
 namespace redis {
 
@@ -288,12 +288,12 @@ void TrimCommandBitmap(std::vector<uint64_t> &bitmap);
 Status ApplyPasswordAction(redis::AclUser &user, const PasswordAction &action) {
   switch (action.kind) {
     case PasswordAction::Kind::kAddPlain: {
-      auto digest = util::Sha256Hex(action.value);
+      auto digest = Sha256Hex(action.value);
       user.passwords.insert(digest);
       break;
     }
     case PasswordAction::Kind::kRemovePlain: {
-      auto digest = util::Sha256Hex(action.value);
+      auto digest = Sha256Hex(action.value);
       user.passwords.erase(digest);
       break;
     }
