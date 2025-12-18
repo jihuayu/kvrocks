@@ -40,7 +40,6 @@
 
 #include "commands/command_parser.h"
 #include "commands/commander.h"
-#include "common/sha256.h"
 #include "common/string_util.h"
 #include "config/config.h"
 #include "fmt/format.h"
@@ -54,6 +53,7 @@
 #include "storage/storage.h"
 #include "thread_util.h"
 #include "time_util.h"
+#include "vendor/sha256.h"
 #include "version.h"
 #include "worker.h"
 
@@ -2210,64 +2210,37 @@ AuthResult Server::AuthenticateUser(const std::string &username, const std::stri
     return AuthenticateUser(password, ns, acl_user, acl_user_index);
   }
 
-  if (acl_user) {
-    *acl_user = nullptr;
-  }
-  if (acl_user_index) {
-    *acl_user_index = redis::Connection::kInvalidAclUserIndex;
-  }
-
   const auto &requirepass = GetConfig()->requirepass;
   if (requirepass.empty()) {
     return AuthResult::NO_REQUIRE_PASS;
   }
 
   if (config_->acl_preview_enabled) {
-    auto acl_or = acl_.Get(username);
-    if (acl_or.IsOK()) {
-      const auto &user = acl_or.GetValue();
-      if (!user.enabled) {
+    auto index = acl_.GetUserIndex(username);
+    if (index.has_value()) {
+      *acl_user_index = index.value();
+
+      auto user = acl_.GetCachedUserByIndex(index.value());
+      *acl_user = user;
+      if (!user->enabled) {
         return AuthResult::INVALID_PASSWORD;
       }
-
-      if (!user.passwords.empty()) {
+      if (!user->passwords.empty()) {
         if (password.empty()) {
           return AuthResult::INVALID_PASSWORD;
         }
-        auto digest = util::Sha256Hex(password);
-        if (user.passwords.find(digest) == user.passwords.end()) {
+        auto digest = Sha256Hex(password);
+        if (user->passwords.find(digest) == user->passwords.end()) {
           return AuthResult::INVALID_PASSWORD;
         }
+        *ns = user->ns;
+        return AuthResult::IS_USER;
       }
-
-      if (acl_user) {
-        *acl_user = std::make_shared<const redis::AclUser>(user);
-      }
-      if (acl_user_index) {
-        auto index = acl_.GetUserIndex(username);
-        if (index.has_value()) {
-          *acl_user_index = index.value();
-        }
-      }
-      *ns = user.ns;
-      return AuthResult::IS_USER;
-    }
-    if (!acl_or.Is<Status::NotFound>()) {
-      warn("[server] Failed to load ACL user `{}` during authentication: {}", username, acl_or.ToStatus().Msg());
       return AuthResult::INVALID_PASSWORD;
     }
   }
 
-  if (util::ToLower(username) != "default") {
-    return AuthResult::INVALID_PASSWORD;
-  }
-
-  if (password != requirepass) {
-    return AuthResult::INVALID_PASSWORD;
-  }
-
-  *ns = kDefaultNamespace;
-  return AuthResult::IS_ADMIN;
+  return AuthResult::INVALID_PASSWORD;
 }
 
 AuthResult Server::AuthenticateUser(const std::string &user_password, std::string *ns,
@@ -2282,34 +2255,6 @@ AuthResult Server::AuthenticateUser(const std::string &user_password, std::strin
   const auto &requirepass = GetConfig()->requirepass;
   if (requirepass.empty()) {
     return AuthResult::NO_REQUIRE_PASS;
-  }
-
-  if (config_->acl_preview_enabled) {
-    auto acl_or = acl_.Get(user_password);
-    if (acl_or.IsOK()) {
-      const auto &user = acl_or.GetValue();
-      if (!user.enabled) {
-        return AuthResult::INVALID_PASSWORD;
-      }
-      if (!user.passwords.empty()) {
-        return AuthResult::INVALID_PASSWORD;
-      }
-      if (acl_user) {
-        *acl_user = std::make_shared<const redis::AclUser>(user);
-      }
-      if (acl_user_index) {
-        auto index = acl_.GetUserIndex(user_password);
-        if (index.has_value()) {
-          *acl_user_index = index.value();
-        }
-      }
-      *ns = user.ns;
-      return AuthResult::IS_USER;
-    }
-    if (!acl_or.Is<Status::NotFound>()) {
-      warn("[server] Failed to load ACL user `{}` during authentication: {}", user_password, acl_or.ToStatus().Msg());
-      return AuthResult::INVALID_PASSWORD;
-    }
   }
 
   auto get_ns = GetNamespace()->GetByToken(user_password);

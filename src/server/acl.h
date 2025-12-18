@@ -87,9 +87,7 @@ class AclUserManager {
   AclUserManager();
   std::shared_ptr<const AclUser> GetUserByIndex(size_t index);
   std::shared_ptr<const AclUser> GetUserByUserName(const std::string &username);
-  std::shared_ptr<const AclUser> AuthenticateUser(const std::string &username, const std::string &password);
   std::optional<size_t> GetUserIndex(const std::string &username) const;
-  bool UpdateUser(const std::string &username, std::shared_ptr<const AclUser> user);
   bool SetUser(const std::string &username, std::shared_ptr<const AclUser> user);
   bool AddUser(const std::string &username, std::shared_ptr<const AclUser> user);
   bool DeleteUser(const std::string &username);

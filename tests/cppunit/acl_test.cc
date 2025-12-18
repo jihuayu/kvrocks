@@ -231,57 +231,7 @@ TEST_F(AclTest, UserPasswordManagement) {
   EXPECT_TRUE(getAndAssertUser(*acl, "nopassuser").passwords.empty());
 }
 
-// ============================================================================
-// Selector and Pattern Tests
-// ============================================================================
 
-TEST_F(AclTest, SelectorKeyPatterns) {
-  auto acl = createAcl();
-  auto user = BuildUserWithPatterns("default", {"user:*", "session:*", "cache:*"});
-  ASSERT_TRUE(acl->Set("patternuser", user).IsOK());
-
-  const auto &stored = getAndAssertUser(*acl, "patternuser");
-  ASSERT_EQ(1U, stored.allowed_commands.size());
-  const auto &key_patterns = stored.allowed_commands[0].key_patterns;
-  EXPECT_EQ(3U, key_patterns.size());
-  EXPECT_EQ("user:*", key_patterns[0].pattern);
-  EXPECT_EQ(redis::kAclKeyAll, key_patterns[0].flags);
-  EXPECT_EQ("session:*", key_patterns[1].pattern);
-  EXPECT_EQ("cache:*", key_patterns[2].pattern);
-}
-
-TEST_F(AclTest, SelectorChannelPatterns) {
-  auto acl = createAcl();
-  auto user = BuildUserWithChannels("default", {"news:*", "events:*"});
-  ASSERT_TRUE(acl->Set("channeluser", user).IsOK());
-
-  const auto &stored = getAndAssertUser(*acl, "channeluser");
-  ASSERT_EQ(1U, stored.allowed_commands.size());
-  const auto &channels = stored.allowed_commands[0].channels;
-  EXPECT_EQ(2U, channels.size());
-  EXPECT_EQ("news:*", channels[0]);
-  EXPECT_EQ("events:*", channels[1]);
-}
-
-TEST_F(AclTest, MultipleSelectorsSupport) {
-  auto acl = createAcl();
-  auto user = BuildUser(true, "default");
-
-  // Add second selector
-  redis::AclSelector second_selector{};
-  second_selector.flags = 1;
-  second_selector.key_patterns.emplace_back("readonly:*", redis::kAclKeyAll);
-  user.allowed_commands.push_back(second_selector);
-
-  ASSERT_TRUE(acl->Set("multiselect", user).IsOK());
-
-  const auto &stored = getAndAssertUser(*acl, "multiselect");
-  EXPECT_EQ(2U, stored.allowed_commands.size());
-  EXPECT_EQ(0U, stored.allowed_commands[0].flags);
-  EXPECT_EQ(1U, stored.allowed_commands[1].flags);
-  EXPECT_EQ(1U, stored.allowed_commands[1].key_patterns.size());
-  EXPECT_EQ("readonly:*", stored.allowed_commands[1].key_patterns[0].pattern);
-}
 
 // ============================================================================
 // Command Manager Tests

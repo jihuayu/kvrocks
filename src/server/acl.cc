@@ -602,19 +602,6 @@ std::string BuildMapReply(Connection *conn, const std::vector<std::pair<std::str
   return result;
 }
 
-std::string FormatSelector(Connection *conn, const AclSelector &selector) {
-  std::vector<std::pair<std::string, std::string>> entries;
-  entries.emplace_back("flags", redis::ArrayOfBulkStrings(BuildSelectorFlags(selector)));
-  entries.emplace_back("commands", redis::ArrayOfBulkStrings(BuildCommandRules(selector.allowed_commands)));
-  entries.emplace_back("keys", redis::ArrayOfBulkStrings(BuildSelectorKeys(selector)));
-  entries.emplace_back("channels", redis::ArrayOfBulkStrings(BuildSelectorChannels(selector)));
-  auto categories = BuildCategoryRules(selector.allowed_category);
-  if (!categories.empty()) {
-    entries.emplace_back("categories", redis::ArrayOfBulkStrings(categories));
-  }
-  return BuildMapReply(conn, entries);
-}
-
 std::string FormatAclUser(Connection *conn, const AclUser &user) {
   const AclSelector *root_selector = user.allowed_commands.empty() ? nullptr : &user.allowed_commands.front();
 
@@ -628,19 +615,7 @@ std::string FormatAclUser(Connection *conn, const AclUser &user) {
   entries.emplace_back("commands", redis::ArrayOfBulkStrings(BuildCommandRules(selector_ref.allowed_commands)));
   entries.emplace_back("keys", redis::ArrayOfBulkStrings(BuildSelectorKeys(selector_ref)));
   entries.emplace_back("channels", redis::ArrayOfBulkStrings(BuildSelectorChannels(selector_ref)));
-  auto categories = BuildCategoryRules(selector_ref.allowed_category);
-  if (!categories.empty()) {
-    entries.emplace_back("categories", redis::ArrayOfBulkStrings(categories));
-  }
-
-  std::vector<std::string> selector_payloads;
-  if (user.allowed_commands.size() > 1) {
-    selector_payloads.reserve(user.allowed_commands.size() - 1);
-    for (size_t i = 1; i < user.allowed_commands.size(); ++i) {
-      selector_payloads.emplace_back(FormatSelector(conn, user.allowed_commands[i]));
-    }
-  }
-  entries.emplace_back("selectors", redis::Array(selector_payloads));
+  // TODO: categories and selectors support
   entries.emplace_back("namespace", redis::BulkString(user.ns));
 
   return BuildMapReply(conn, entries);
@@ -957,39 +932,6 @@ std::optional<size_t> AclUserManager::GetUserIndex(const std::string &username) 
     return std::nullopt;
   }
   return iter->second;
-}
-
-std::shared_ptr<const AclUser> AclUserManager::AuthenticateUser(const std::string &username,
-                                                                const std::string &password) {
-  auto user = GetUserByUserName(username);
-  if (!user || !user->enabled) {
-    return nullptr;
-  }
-
-  if (user->passwords.empty()) {
-    // Empty password set means NOPASS.
-    return user;
-  }
-
-  if (password.empty()) {
-    return nullptr;
-  }
-
-  auto digest = util::Sha256Hex(password);
-  return user->passwords.find(digest) != user->passwords.end() ? user : nullptr;
-}
-
-bool AclUserManager::UpdateUser(const std::string &username, std::shared_ptr<const AclUser> user) {
-  std::shared_lock<std::shared_mutex> lock(mu_);
-  auto iter = username_index_.find(username);
-  if (iter == username_index_.end()) {
-    return false;
-  }
-  const auto slot = static_cast<size_t>(iter->second);
-  lock.unlock();
-
-  std::atomic_store(&user_array_[slot], std::move(user));
-  return true;
 }
 
 bool AclUserManager::SetUser(const std::string &username, std::shared_ptr<const AclUser> user) {
