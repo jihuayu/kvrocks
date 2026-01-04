@@ -231,8 +231,6 @@ TEST_F(AclTest, UserPasswordManagement) {
   EXPECT_TRUE(getAndAssertUser(*acl, "nopassuser").passwords.empty());
 }
 
-
-
 // ============================================================================
 // Command Manager Tests
 // ============================================================================

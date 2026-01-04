@@ -131,7 +131,6 @@ void SHA256_Final(unsigned char hash[32], SHA256_CTX *ctx) {
   }
 }
 
-
 std::string Sha256Hex(std::string_view input) {
   SHA256_CTX ctx;
   SHA256_Init(&ctx);
