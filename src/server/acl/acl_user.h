@@ -46,6 +46,12 @@ constexpr uint32_t kAclKeyRead = 1 << 0;
 constexpr uint32_t kAclKeyWrite = 1 << 1;
 constexpr uint32_t kAclKeyAll = kAclKeyRead | kAclKeyWrite;
 
+// Selector flags. Root selector always exists; all* flags represent wildcard grants.
+constexpr uint32_t kAclSelectorRoot = 1 << 0;
+constexpr uint32_t kAclSelectorAllKeys = 1 << 1;
+constexpr uint32_t kAclSelectorAllChannels = 1 << 2;
+constexpr uint32_t kAclSelectorAllCommands = 1 << 3;
+
 // Key pattern with permissions (%R~pattern, %W~pattern, ~pattern)
 struct AclKeyPattern {
   std::string pattern;
@@ -69,9 +75,10 @@ class AclSelector {
 class AclUser {
  public:
   bool enabled = false;                       // Whether the user is enabled
+  bool nopass = false;                        // Whether any password is accepted (Redis "nopass")
   std::string ns;                             // Namespace of the user
   std::vector<AclSelector> allowed_commands;  // The first is the root selector, the rest are regular selectors
-  std::set<std::string> passwords;            // Set of passwords, stored as sha256 hashes. Nopass if set is empty
+  std::set<std::string> passwords;            // Set of passwords, stored as sha256 hashes
 
   jsoncons::json ToJson() const;
   static StatusOr<AclUser> FromJson(const jsoncons::json &json);
@@ -96,7 +103,7 @@ class AclUserManager {
   std::optional<std::string> GetUsernameByIndex(size_t index) const;
 
  private:
-  size_t findFreeSlotLocked() const;
+  std::optional<size_t> findFreeSlotLocked() const;
   mutable std::shared_mutex mu_;
   // username to user_array_ index mapping
   std::map<std::string, size_t> username_index_;

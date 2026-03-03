@@ -27,6 +27,7 @@ namespace redis {
 namespace {
 
 constexpr const char *kJsonFieldEnabled = "enabled";
+constexpr const char *kJsonFieldNoPass = "nopass";
 constexpr const char *kJsonFieldNamespace = "namespace";
 constexpr const char *kJsonFieldPasswords = "passwords";
 constexpr const char *kJsonFieldSelectors = "selectors";
@@ -169,6 +170,7 @@ jsoncons::json SelectorToJson(const AclSelector &selector) {
 jsoncons::json AclUser::ToJson() const {
   jsoncons::json json;
   json[kJsonFieldEnabled] = enabled;
+  json[kJsonFieldNoPass] = nopass;
   json[kJsonFieldNamespace] = ns;
 
   jsoncons::json passwords_array(jsoncons::json_array_arg);
@@ -202,6 +204,13 @@ StatusOr<AclUser> AclUser::FromJson(const jsoncons::json &json) {
   }
   user.enabled = json[kJsonFieldEnabled].as<bool>();
 
+  if (json.contains(kJsonFieldNoPass)) {
+    if (!json[kJsonFieldNoPass].is_bool()) {
+      return {Status::NotOK, "nopass must be a boolean"};
+    }
+    user.nopass = json[kJsonFieldNoPass].as<bool>();
+  }
+
   if (!json[kJsonFieldNamespace].is_string()) {
     return {Status::NotOK, "namespace must be a string"};
   }
@@ -217,6 +226,10 @@ StatusOr<AclUser> AclUser::FromJson(const jsoncons::json &json) {
       return {Status::NotOK, "passwords entries must be strings"};
     }
     user.passwords.insert(password.as_string());
+  }
+  if (!json.contains(kJsonFieldNoPass)) {
+    // Backward compatibility with older persisted ACL schema where empty passwords implied nopass.
+    user.nopass = user.passwords.empty();
   }
 
   const auto &selectors_json = json[kJsonFieldSelectors];
@@ -234,18 +247,21 @@ StatusOr<AclUser> AclUser::FromJson(const jsoncons::json &json) {
 
 void ResetUserState(AclUser &user) {
   user.enabled = false;
+  user.nopass = false;
   user.passwords.clear();
   user.allowed_commands.clear();
   AclSelector root{};
-  root.flags = 0;
+  root.flags = kAclSelectorRoot;
   user.allowed_commands.emplace_back(std::move(root));
 }
 
 AclSelector &EnsureRootSelector(AclUser &user) {
   if (user.allowed_commands.empty()) {
     AclSelector root{};
-    root.flags = 0;
+    root.flags = kAclSelectorRoot;
     user.allowed_commands.emplace_back(std::move(root));
+  } else {
+    user.allowed_commands.front().flags |= kAclSelectorRoot;
   }
   return user.allowed_commands.front();
 }
@@ -255,13 +271,13 @@ AclUserManager::AclUserManager() {
   // TODO: Load persisted ACL users and populate username_index_.
 }
 
-size_t AclUserManager::findFreeSlotLocked() const {
+std::optional<size_t> AclUserManager::findFreeSlotLocked() const {
   for (size_t i = 0; i < user_array_.size(); ++i) {
     if (!std::atomic_load(&user_array_[i])) {
       return i;
     }
   }
-  return -1;
+  return std::nullopt;
 }
 
 std::shared_ptr<const AclUser> AclUserManager::GetUserByIndex(size_t index) {
@@ -296,10 +312,11 @@ bool AclUserManager::SetUser(const std::string &username, std::shared_ptr<const 
   auto iter = username_index_.find(username);
   size_t slot = 0;
   if (iter == username_index_.end()) {
-    slot = findFreeSlotLocked();
-    if (slot < 0) {
+    auto free_slot = findFreeSlotLocked();
+    if (!free_slot.has_value()) {
       return false;
     }
+    slot = free_slot.value();
     username_index_[username] = slot;
   } else {
     slot = iter->second;
@@ -315,7 +332,11 @@ bool AclUserManager::AddUser(const std::string &username, std::shared_ptr<const 
     return false;
   }
 
-  const size_t slot = findFreeSlotLocked();
+  auto free_slot = findFreeSlotLocked();
+  if (!free_slot.has_value()) {
+    return false;
+  }
+  const size_t slot = free_slot.value();
 
   username_index_.emplace(username, slot);
   std::atomic_store(&user_array_[slot], std::move(user));

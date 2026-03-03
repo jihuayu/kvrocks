@@ -239,8 +239,14 @@ Status Acl::HandleSetUser(Namespace *ns_mgr, const std::string &username, const 
   }
 
   std::vector<SetUserAction> actions;
-  actions.reserve(modifiers.size());
-  for (const auto &token : modifiers) {
+  auto merged_modifiers_or = MergeSelectorArguments(modifiers);
+  if (!merged_modifiers_or.IsOK()) {
+    return std::move(merged_modifiers_or).ToStatus();
+  }
+  auto merged_modifiers = std::move(merged_modifiers_or.GetValue());
+
+  actions.reserve(merged_modifiers.size());
+  for (const auto &token : merged_modifiers) {
     auto status = ParseSetUserToken(token, &actions);
     if (!status.IsOK()) {
       return status;

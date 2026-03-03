@@ -222,7 +222,104 @@ void Connection::ClearAclProfile() {
   acl_user_.reset();
 }
 
-Status Connection::CheckAclCommandAllowed(Acl *acl, const std::string &cmd_name) {
+namespace {
+
+bool SelectorAllowsCommand(const redis::AclSelector &selector, const std::string &command) {
+  if ((selector.flags & redis::kAclSelectorAllCommands) != 0) {
+    return true;
+  }
+  auto &manager = redis::AclCommandManager::Instance();
+  return manager.IsCommandAllowed(selector.allowed_commands, command);
+}
+
+uint32_t CommandRequiredKeyPerm(uint64_t cmd_flags) {
+  return (cmd_flags & redis::kCmdWrite) ? redis::kAclKeyWrite : redis::kAclKeyRead;
+}
+
+bool SelectorAllowsKey(const redis::AclSelector &selector, const std::string &key, uint32_t required_perm) {
+  if ((selector.flags & redis::kAclSelectorAllKeys) != 0) {
+    return true;
+  }
+  for (const auto &pattern : selector.key_patterns) {
+    if ((pattern.flags & required_perm) == 0) {
+      continue;
+    }
+    if (util::StringMatch(pattern.pattern, key, false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool SelectorAllowsKeys(const redis::AclSelector &selector, const CommandAttributes *attributes,
+                        const std::vector<std::string> &cmd_tokens, uint64_t cmd_flags) {
+  bool has_key = false;
+  bool denied = false;
+  const auto required_perm = CommandRequiredKeyPerm(cmd_flags);
+  attributes->ForEachKeyRange(
+      [&](const std::vector<std::string> &args, const redis::CommandKeyRange &key_range) {
+        key_range.ForEachKey(
+            [&](const std::string &key) {
+              has_key = true;
+              if (!SelectorAllowsKey(selector, key, required_perm)) {
+                denied = true;
+              }
+            },
+            args);
+      },
+      cmd_tokens, [](const auto &) {});
+  return !has_key || !denied;
+}
+
+enum class ChannelMatchMode { kGlob, kLiteral };
+
+bool MatchSelectorChannel(const redis::AclSelector &selector, const std::string &channel, ChannelMatchMode mode) {
+  if ((selector.flags & redis::kAclSelectorAllChannels) != 0) {
+    return true;
+  }
+  for (const auto &pattern : selector.channels) {
+    if (mode == ChannelMatchMode::kLiteral) {
+      if (pattern == channel) {
+        return true;
+      }
+    } else if (util::StringMatch(pattern, channel, false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool SelectorAllowsChannels(const redis::AclSelector &selector, const std::string &command,
+                            const std::vector<std::string> &cmd_tokens) {
+  if (cmd_tokens.size() <= 1) {
+    return true;
+  }
+
+  bool is_channel_command = false;
+  ChannelMatchMode match_mode = ChannelMatchMode::kGlob;
+  if (command == "publish" || command == "spublish" || command == "subscribe" || command == "ssubscribe") {
+    is_channel_command = true;
+  } else if (command == "psubscribe") {
+    is_channel_command = true;
+    match_mode = ChannelMatchMode::kLiteral;
+  }
+
+  if (!is_channel_command) {
+    return true;
+  }
+
+  for (size_t i = 1; i < cmd_tokens.size(); ++i) {
+    if (!MatchSelectorChannel(selector, cmd_tokens[i], match_mode)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *attributes,
+                                          const std::vector<std::string> &cmd_tokens, uint64_t cmd_flags) {
   if (!acl_enforced_) {
     return Status::OK();
   }
@@ -239,15 +336,21 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const std::string &cmd_name)
     return {Status::RedisExecErr, "ACL user is disabled"};
   }
 
-  auto &manager = AclCommandManager::Instance();
-  auto command = util::ToLower(cmd_name);
-  const auto &bitmap = acl_user_->allowed_commands.empty() ? std::vector<uint64_t>{}
-                                                           : acl_user_->allowed_commands.front().allowed_commands;
-  if (!manager.IsCommandAllowed(bitmap, command)) {
-    return {Status::RedisExecErr, fmt::format("ACL user is not allowed to run `{}`", command)};
+  const auto command = util::ToLower(attributes->name);
+  for (const auto &selector : acl_user_->allowed_commands) {
+    if (!SelectorAllowsCommand(selector, command)) {
+      continue;
+    }
+    if (!SelectorAllowsKeys(selector, attributes, cmd_tokens, cmd_flags)) {
+      continue;
+    }
+    if (!SelectorAllowsChannels(selector, command, cmd_tokens)) {
+      continue;
+    }
+    return Status::OK();
   }
 
-  return Status::OK();
+  return {Status::RedisExecErr, fmt::format("ACL user is not allowed to run `{}`", command)};
 }
 
 void Connection::SubscribeChannel(const std::string &channel) {
@@ -537,7 +640,7 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
     }
 
     if (config->acl_preview_enabled && !IsAdmin() && HasAclProfile()) {
-      auto acl_status = CheckAclCommandAllowed(srv_->GetAcl(), cmd_name);
+      auto acl_status = CheckAclCommandAllowed(srv_->GetAcl(), attributes, cmd_tokens, cmd_flags);
       if (!acl_status.IsOK()) {
         Reply(redis::Error(acl_status));
         continue;

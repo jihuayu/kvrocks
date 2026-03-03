@@ -2210,33 +2210,39 @@ AuthResult Server::AuthenticateUser(const std::string &username, const std::stri
     return AuthenticateUser(password, ns, acl_user, acl_user_index);
   }
 
-  const auto &requirepass = GetConfig()->requirepass;
-  if (requirepass.empty()) {
-    return AuthResult::NO_REQUIRE_PASS;
-  }
-
   if (config_->acl_preview_enabled) {
     auto index = acl_.GetUserIndex(username);
     if (index.has_value()) {
-      *acl_user_index = index.value();
+      if (acl_user_index) {
+        *acl_user_index = index.value();
+      }
 
       auto user = acl_.GetCachedUserByIndex(index.value());
-      *acl_user = user;
-      if (!user->enabled) {
+      if (acl_user) {
+        *acl_user = user;
+      }
+      if (!user || !user->enabled) {
         return AuthResult::INVALID_PASSWORD;
       }
-      if (!user->passwords.empty()) {
-        if (password.empty()) {
-          return AuthResult::INVALID_PASSWORD;
-        }
-        auto digest = Sha256Hex(password);
-        if (user->passwords.find(digest) == user->passwords.end()) {
-          return AuthResult::INVALID_PASSWORD;
-        }
-        *ns = user->ns;
+
+      // nopass users authenticate with any supplied password when username is explicit.
+      if (user->nopass) {
+        *ns = user->ns.empty() ? kDefaultNamespace : user->ns;
         return AuthResult::IS_USER;
       }
-      return AuthResult::INVALID_PASSWORD;
+
+      if (user->passwords.empty()) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      if (password.empty()) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      auto digest = Sha256Hex(password);
+      if (user->passwords.find(digest) == user->passwords.end()) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      *ns = user->ns.empty() ? kDefaultNamespace : user->ns;
+      return AuthResult::IS_USER;
     }
   }
 
@@ -2250,6 +2256,34 @@ AuthResult Server::AuthenticateUser(const std::string &user_password, std::strin
   }
   if (acl_user_index) {
     *acl_user_index = redis::Connection::kInvalidAclUserIndex;
+  }
+
+  if (config_->acl_preview_enabled) {
+    auto index = acl_.GetUserIndex("default");
+    if (index.has_value()) {
+      auto user = acl_.GetCachedUserByIndex(index.value());
+      if (!user || !user->enabled) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      if (acl_user) {
+        *acl_user = user;
+      }
+      if (acl_user_index) {
+        *acl_user_index = index.value();
+      }
+      if (user->nopass) {
+        return AuthResult::NO_REQUIRE_PASS;
+      }
+      if (user->passwords.empty()) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      auto digest = Sha256Hex(user_password);
+      if (user->passwords.find(digest) != user->passwords.end()) {
+        *ns = user->ns.empty() ? kDefaultNamespace : user->ns;
+        return AuthResult::IS_USER;
+      }
+      return AuthResult::INVALID_PASSWORD;
+    }
   }
 
   const auto &requirepass = GetConfig()->requirepass;

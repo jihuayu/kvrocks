@@ -79,7 +79,12 @@ class CommandAuth : public Commander {
       case AuthResult::IS_USER: {
         conn->BecomeUser();
         if (acl_user && acl_user_index != Connection::kInvalidAclUserIndex) {
-          const std::string &profile_name = has_username_ ? username_ : password_;
+          std::string profile_name = has_username_ ? username_ : "default";
+          if (!has_username_) {
+            if (auto username_or = srv->GetAcl()->GetUsernameByIndex(acl_user_index); username_or.has_value()) {
+              profile_name = username_or.value();
+            }
+          }
           conn->SetAclProfile(profile_name, acl_user_index, acl_user);
         }
         break;
@@ -908,7 +913,12 @@ class CommandHello final : public Commander {
           case AuthResult::IS_USER: {
             conn->BecomeUser();
             if (acl_user && acl_user_index != Connection::kInvalidAclUserIndex) {
-              const std::string &profile_name = auth_username.empty() ? auth_password : auth_username;
+              std::string profile_name = auth_username.empty() ? "default" : auth_username;
+              if (auth_username.empty()) {
+                if (auto username_or = srv->GetAcl()->GetUsernameByIndex(acl_user_index); username_or.has_value()) {
+                  profile_name = username_or.value();
+                }
+              }
               conn->SetAclProfile(profile_name, acl_user_index, acl_user);
             }
             break;

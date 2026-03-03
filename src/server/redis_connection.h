@@ -187,8 +187,8 @@ class Connection : public EvbufCallbackBase<Connection> {
   const std::string &GetAclUsername() const { return acl_username_; }
   size_t GetAclUserIndex() const { return acl_user_index_; }
 
-  // TODO:
-  Status CheckAclCommandAllowed(Acl *acl, const std::string &cmd_name);
+  Status CheckAclCommandAllowed(Acl *acl, const CommandAttributes *attributes, const std::vector<std::string> &cmd_tokens,
+                                uint64_t cmd_flags);
 
   // Multi exec
   void SetInExec() { in_exec_ = true; }

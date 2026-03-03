@@ -86,6 +86,10 @@ using SetUserAction = std::variant<EnableAction, DisableAction, ResetUserAction,
 // Parse a single token from ACL SETUSER command into actions
 Status ParseSetUserToken(const std::string &token, std::vector<SetUserAction> *actions);
 
+// Merge selector arguments split across multiple command tokens:
+// ( +get ~foo:* ) => "(+get ~foo:*)"
+StatusOr<std::vector<std::string>> MergeSelectorArguments(const std::vector<std::string> &modifiers);
+
 // Apply a single action to an AclUser
 Status ApplySetUserAction(AclUser &user, const SetUserAction &action);
 

@@ -41,6 +41,7 @@ class AclCommandManager {
   size_t RegisterCommand(const std::string &name, CommandCategory category);
   std::optional<size_t> GetCommandBit(const std::string &name) const;
   StatusOr<std::vector<uint64_t>> BuildBitmapForCommands(const std::vector<std::string> &commands) const;
+  StatusOr<std::vector<uint64_t>> BuildBitmapForCategory(const std::string &category) const;
   std::vector<std::string> CommandsFromBitmap(const std::vector<uint64_t> &bitmap) const;
   std::vector<uint64_t> BuildBitmapForAllCommands() const;
   bool IsCommandAllowed(const std::vector<uint64_t> &bitmap, const std::string &command) const;
@@ -55,6 +56,7 @@ class AclCommandManager {
 
   mutable std::shared_mutex mu_;
   std::map<std::string, size_t> command_bits_;
+  std::map<std::string, CommandCategory> command_categories_;
   size_t next_bit_ = 0;
   std::atomic<bool> sealed_{false};
 };

@@ -22,12 +22,46 @@
 
 #include <algorithm>
 #include <shared_mutex>
+#include <string_view>
 #include <utility>
 
+#include "commands/commander.h"
 #include "common/logging.h"
 #include "common/string_util.h"
 
 namespace redis {
+
+namespace {
+
+std::optional<CommandCategory> ParseCategoryName(std::string_view category) {
+  if (category == "unknown") return CommandCategory::Unknown;
+  if (category == "bit") return CommandCategory::Bit;
+  if (category == "bloomfilter") return CommandCategory::BloomFilter;
+  if (category == "cluster") return CommandCategory::Cluster;
+  if (category == "function") return CommandCategory::Function;
+  if (category == "geo") return CommandCategory::Geo;
+  if (category == "hash") return CommandCategory::Hash;
+  if (category == "hll") return CommandCategory::HLL;
+  if (category == "json") return CommandCategory::JSON;
+  if (category == "key") return CommandCategory::Key;
+  if (category == "list") return CommandCategory::List;
+  if (category == "pubsub") return CommandCategory::Pubsub;
+  if (category == "replication") return CommandCategory::Replication;
+  if (category == "script") return CommandCategory::Script;
+  if (category == "search") return CommandCategory::Search;
+  if (category == "server") return CommandCategory::Server;
+  if (category == "set") return CommandCategory::Set;
+  if (category == "sortedint") return CommandCategory::SortedInt;
+  if (category == "stream") return CommandCategory::Stream;
+  if (category == "string") return CommandCategory::String;
+  if (category == "tdigest") return CommandCategory::TDigest;
+  if (category == "txn") return CommandCategory::Txn;
+  if (category == "zset") return CommandCategory::ZSet;
+  if (category == "timeseries") return CommandCategory::Timeseries;
+  return std::nullopt;
+}
+
+}  // namespace
 
 AclCommandManager &AclCommandManager::Instance() {
   static AclCommandManager instance;
@@ -50,6 +84,7 @@ size_t AclCommandManager::RegisterCommand(const std::string &name, [[maybe_unuse
 
   auto bit = next_bit_++;
   command_bits_.emplace(key, bit);
+  command_categories_.emplace(key, category);
   return bit;
 }
 
@@ -74,6 +109,29 @@ StatusOr<std::vector<uint64_t>> AclCommandManager::BuildBitmapForCommands(
       return Status{Status::NotOK, "unknown ACL command: " + command};
     }
     const size_t bit = iter->second;
+    const size_t index = bit / 64;
+    if (bitmap.size() <= index) {
+      bitmap.resize(index + 1, 0);
+    }
+    bitmap[index] |= (UINT64_C(1) << (bit % 64));
+  }
+  return bitmap;
+}
+
+StatusOr<std::vector<uint64_t>> AclCommandManager::BuildBitmapForCategory(const std::string &category) const {
+  const std::string key = util::ToLower(category);
+  auto category_enum = ParseCategoryName(key);
+  if (!category_enum.has_value()) {
+    return {Status::RedisParseErr, "unknown ACL category: " + category};
+  }
+
+  std::shared_lock<std::shared_mutex> lock(mu_);
+  std::vector<uint64_t> bitmap;
+  for (const auto &[name, bit] : command_bits_) {
+    auto category_iter = command_categories_.find(name);
+    if (category_iter == command_categories_.end() || category_iter->second != category_enum.value()) {
+      continue;
+    }
     const size_t index = bit / 64;
     if (bitmap.size() <= index) {
       bitmap.resize(index + 1, 0);
