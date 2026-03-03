@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/apache/kvrocks/tests/gocase/util"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,6 +78,19 @@ func extractUsernames(t *testing.T, result interface{}) []string {
 		usernames[i] = u.(string)
 	}
 	return usernames
+}
+
+func requireACLDenied(t *testing.T, err error) {
+	t.Helper()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "NOPERM")
+}
+
+func authAsUser(t *testing.T, ctx context.Context, rdb *redis.Client, username, password string) {
+	t.Helper()
+	result, err := rdb.Do(ctx, "AUTH", username, password).Result()
+	require.NoError(t, err)
+	require.Equal(t, "OK", result)
 }
 
 func TestACLPreviewDisabled(t *testing.T) {
@@ -407,9 +421,10 @@ func TestACLGetUser(t *testing.T) {
 		require.NoError(t, err)
 
 		fieldMap := parseGetUserResult(t, result)
-		for _, field := range []string{"flags", "passwords", "commands", "keys", "channels", "selectors", "namespace"} {
+		for _, field := range []string{"flags", "passwords", "commands", "keys", "channels", "selectors"} {
 			require.Contains(t, fieldMap, field)
 		}
+		require.NotContains(t, fieldMap, "namespace")
 	})
 
 	t.Run("Returns nil for non-existing user", func(t *testing.T) {
@@ -576,4 +591,355 @@ func TestACLComplexScenarios(t *testing.T) {
 			require.Contains(t, usernames, fmt.Sprintf("user_%s", tenant))
 		}
 	})
+}
+
+func TestACLDefaultUserNoPassAuthBehavior(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	// Equivalent to the docs EXT-01 branch, adapted to current kvrocks error text.
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "default", "on", "nopass", "+@all", "~*", "&*").Err())
+
+	c := srv.NewClient()
+	defer func() { require.NoError(t, c.Close()) }()
+
+	err := c.Do(ctx, "AUTH", "anypass").Err()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no password is set")
+
+	result, err := c.Do(ctx, "AUTH", "default", "anypass").Result()
+	require.NoError(t, err)
+	require.Equal(t, "OK", result)
+}
+
+func TestACLSetUserUpdateIsAtomicOnError(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "atom", "on", ">p", "+get", "~*").Err())
+	require.NoError(t, admin.Set(ctx, "k", "seed", 0).Err())
+
+	userClient := srv.NewClient()
+	defer func() { require.NoError(t, userClient.Close()) }()
+	authAsUser(t, ctx, userClient, "atom", "p")
+
+	require.NoError(t, userClient.Do(ctx, "GET", "k").Err())
+	requireACLDenied(t, userClient.Do(ctx, "SET", "k", "v0").Err())
+
+	err := admin.Do(ctx, "ACL", "SETUSER", "atom", "+set", "+not-a-command").Err()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown ACL command modifier")
+
+	// The invalid update must not partially apply.
+	require.NoError(t, userClient.Do(ctx, "GET", "k").Err())
+	requireACLDenied(t, userClient.Do(ctx, "SET", "k", "v1").Err())
+}
+
+func TestACLAllKeysAndAllChannelsNeedResetBeforePattern(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	rdb := srv.NewClient()
+	defer func() { require.NoError(t, rdb.Close()) }()
+
+	require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "keys_u", "on", "nopass", "allkeys").Err())
+	err := rdb.Do(ctx, "ACL", "SETUSER", "keys_u", "~foo:*").Err()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "resetkeys")
+
+	require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "channels_u", "on", "nopass", "allchannels").Err())
+	err = rdb.Do(ctx, "ACL", "SETUSER", "channels_u", "&foo:*").Err()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "resetchannels")
+}
+
+func TestACLPSubscribeMatchesLiteralPattern(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "pat", "on", ">p", "+@pubsub", "resetchannels", "&news:*").Err())
+
+	allowed := srv.NewClient()
+	defer func() { require.NoError(t, allowed.Close()) }()
+	authAsUser(t, ctx, allowed, "pat", "p")
+
+	r := allowed.Do(ctx, "PSUBSCRIBE", "news:*")
+	require.NoError(t, r.Err())
+	require.Equal(t, "[psubscribe news:* 1]", fmt.Sprintf("%v", r.Val()))
+
+	denied := srv.NewClient()
+	defer func() { require.NoError(t, denied.Close()) }()
+	authAsUser(t, ctx, denied, "pat", "p")
+	requireACLDenied(t, denied.Do(ctx, "PSUBSCRIBE", "news:1").Err())
+}
+
+func TestACLSelectorOrSemanticsForKeyChecks(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	// Root selector is empty; either extra selector can authorize a command.
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "selector_or", "on", ">p",
+		"nocommands", "resetkeys", "resetchannels",
+		"(+get ~read:*)", "(+set ~write:*)").Err())
+
+	require.NoError(t, admin.Set(ctx, "read:key", "v-read", 0).Err())
+	require.NoError(t, admin.Set(ctx, "write:key", "v-write", 0).Err())
+
+	userClient := srv.NewClient()
+	defer func() { require.NoError(t, userClient.Close()) }()
+	authAsUser(t, ctx, userClient, "selector_or", "p")
+
+	v, err := userClient.Get(ctx, "read:key").Result()
+	require.NoError(t, err)
+	require.Equal(t, "v-read", v)
+
+	requireACLDenied(t, userClient.Get(ctx, "write:key").Err())
+	require.NoError(t, userClient.Set(ctx, "write:key", "v2", 0).Err())
+	requireACLDenied(t, userClient.Set(ctx, "read:key", "v3", 0).Err())
+}
+
+func TestACLCategoryModifiersAreEffective(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "cat_u", "on", ">p", "+@string", "~*").Err())
+
+	userClient := srv.NewClient()
+	defer func() { require.NoError(t, userClient.Close()) }()
+	authAsUser(t, ctx, userClient, "cat_u", "p")
+
+	require.NoError(t, userClient.Set(ctx, "cat:key", "ok", 0).Err())
+	requireACLDenied(t, userClient.Do(ctx, "HSET", "cat:hash", "f", "v").Err())
+}
+
+func TestACLSelectorDefinitionCanSpanMultipleArgs(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	rdb := srv.NewClient()
+	defer func() { require.NoError(t, rdb.Close()) }()
+
+	require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "selector_split", "on", "(~split:*", "+get)").Err())
+
+	result, err := rdb.Do(ctx, "ACL", "GETUSER", "selector_split").Result()
+	require.NoError(t, err)
+	fieldMap := parseGetUserResult(t, result)
+	selectors := fieldMap["selectors"].([]interface{})
+	require.Equal(t, 1, len(selectors))
+}
+
+func TestACLSubcommandCoverage(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	t.Run("HELP", func(t *testing.T) {
+		res, err := admin.Do(ctx, "ACL", "HELP").Result()
+		require.NoError(t, err)
+		items, ok := res.([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, items)
+	})
+
+	t.Run("CAT", func(t *testing.T) {
+		res, err := admin.Do(ctx, "ACL", "CAT").Result()
+		require.NoError(t, err)
+		categories, ok := res.([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, categories)
+
+		res, err = admin.Do(ctx, "ACL", "CAT", "string").Result()
+		require.NoError(t, err)
+		commands, ok := res.([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, commands)
+	})
+
+	t.Run("LIST", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "list_u", "on", "nopass", "+get", "~*").Err())
+		res, err := admin.Do(ctx, "ACL", "LIST").Result()
+		require.NoError(t, err)
+		rows, ok := res.([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, rows)
+
+		found := false
+		for _, row := range rows {
+			if s, ok := row.(string); ok && s == "user list_u on nopass sanitize-payload +get ~*" {
+				found = true
+				break
+			}
+		}
+		require.True(t, found)
+	})
+
+	t.Run("DELUSER", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "to_del", "on", "nopass").Err())
+		res, err := admin.Do(ctx, "ACL", "DELUSER", "to_del").Result()
+		require.NoError(t, err)
+		require.EqualValues(t, 1, res)
+	})
+
+	t.Run("GENPASS", func(t *testing.T) {
+		res, err := admin.Do(ctx, "ACL", "GENPASS").Result()
+		require.NoError(t, err)
+		password, ok := res.(string)
+		require.True(t, ok)
+		require.Len(t, password, 64)
+
+		res, err = admin.Do(ctx, "ACL", "GENPASS", "64").Result()
+		require.NoError(t, err)
+		password, ok = res.(string)
+		require.True(t, ok)
+		require.Len(t, password, 16)
+	})
+
+	t.Run("LOG", func(t *testing.T) {
+		res, err := admin.Do(ctx, "ACL", "LOG").Result()
+		require.NoError(t, err)
+		entries, ok := res.([]interface{})
+		require.True(t, ok)
+		require.Empty(t, entries)
+
+		res, err = admin.Do(ctx, "ACL", "LOG", "RESET").Result()
+		require.NoError(t, err)
+		require.Equal(t, "OK", res)
+	})
+
+	t.Run("DRYRUN", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "dry", "on", ">p", "+get", "~*").Err())
+
+		res, err := admin.Do(ctx, "ACL", "DRYRUN", "dry", "GET", "k").Result()
+		require.NoError(t, err)
+		require.Equal(t, "OK", res)
+
+		err = admin.Do(ctx, "ACL", "DRYRUN", "dry", "SET", "k", "v").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "NOPERM")
+	})
+
+	t.Run("LOAD SAVE placeholder", func(t *testing.T) {
+		err := admin.Do(ctx, "ACL", "LOAD").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not configured to use an ACL file")
+
+		err = admin.Do(ctx, "ACL", "SAVE").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not configured to use an ACL file")
+	})
+}
+
+func TestACLDenyUsesNOPERM(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "nperm", "on", ">p", "+get", "~*").Err())
+
+	userClient := srv.NewClient()
+	defer func() { require.NoError(t, userClient.Close()) }()
+	authAsUser(t, ctx, userClient, "nperm", "p")
+
+	err := userClient.Do(ctx, "SET", "k", "v").Err()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "NOPERM")
+	require.Contains(t, err.Error(), "not allowed")
+}
+
+func TestACLDefaultOffRequiresAuthForNewConnections(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "default", "off").Err())
+
+	pingConn := srv.NewClient()
+	defer func() { require.NoError(t, pingConn.Close()) }()
+	err := pingConn.Ping(ctx).Err()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "NOAUTH")
+
+	helloConn := srv.NewClient()
+	defer func() { require.NoError(t, helloConn.Close()) }()
+	err = helloConn.Do(ctx, "HELLO", "3").Err()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "NOAUTH")
+	require.Contains(t, err.Error(), "HELLO must be called with the client already authenticated")
+}
+
+func TestACLSanitizePayloadFlag(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	rdb := srv.NewClient()
+	defer func() { require.NoError(t, rdb.Close()) }()
+
+	require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "sanitize_u", "on", "skip-sanitize-payload").Err())
+	res, err := rdb.Do(ctx, "ACL", "GETUSER", "sanitize_u").Result()
+	require.NoError(t, err)
+	flags := extractFlags(t, parseGetUserResult(t, res))
+	require.Contains(t, flags, "skip-sanitize-payload")
+	require.NotContains(t, flags, "sanitize-payload")
+
+	require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "sanitize_u", "sanitize-payload").Err())
+	res, err = rdb.Do(ctx, "ACL", "GETUSER", "sanitize_u").Result()
+	require.NoError(t, err)
+	flags = extractFlags(t, parseGetUserResult(t, res))
+	require.Contains(t, flags, "sanitize-payload")
+	require.NotContains(t, flags, "skip-sanitize-payload")
+
+	require.NoError(t, rdb.Do(ctx, "ACL", "SETUSER", "sanitize_u", "reset").Err())
+	res, err = rdb.Do(ctx, "ACL", "GETUSER", "sanitize_u").Result()
+	require.NoError(t, err)
+	flags = extractFlags(t, parseGetUserResult(t, res))
+	require.Contains(t, flags, "sanitize-payload")
+}
+
+func TestACLSetUserRejectsInvalidUsername(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	rdb := srv.NewClient()
+	defer func() { require.NoError(t, rdb.Close()) }()
+
+	invalidUsers := []string{
+		"bad user",
+		"bad\tuser",
+	}
+	for _, username := range invalidUsers {
+		err := rdb.Do(ctx, "ACL", "SETUSER", username, "on").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid characters")
+	}
 }

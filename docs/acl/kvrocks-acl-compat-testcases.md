@@ -7,6 +7,10 @@
 - 当前基线规模：`106 + 34 = 140` 个测试。
 - 错误断言策略：以错误类型和关键字为主（`NOPERM`/`WRONGPASS`/`NOAUTH`/`ERR`），不强制完整文案逐字一致。
 
+> 已确认约束（非缺陷）：
+> 1) `ACL` 容器命令保持 `admin-only`，普通 ACL 用户不放开执行 `ACL` 子命令；
+> 2) `+cmd|sub` / `-cmd|sub` 子命令粒度授权暂缓推进，相关 Redis 兼容用例先不作为当前阶段目标。
+
 ## 2. Redis 现有用例矩阵（按能力分组）
 
 > 说明：这里按“实现能力”聚合，便于在 kvrocks 里按模块推进；完整测试名索引见文末附录。
@@ -17,7 +21,7 @@
 | 命令/Key/Channel 默认拒绝 | 新用户默认无命令/无 key/channel 权限 | `tests/unit/acl.tcl:73` `tests/unit/acl.tcl:142` |
 | PubSub 与 Sharded PubSub | `SUBSCRIBE/PSUBSCRIBE/SSUBSCRIBE`、`PUBLISH/SPUBLISH`、`resetchannels/allchannels` | `tests/unit/acl.tcl:158` `tests/unit/acl.tcl:341` |
 | 权限变更后连接处理 | 订阅者因权限收紧被踢、阻塞命令重处理拒绝 | `tests/unit/acl.tcl:250` `tests/unit/acl.tcl:346` |
-| 命令类别与子命令 | `+@cat/-@cat`、`+cmd/-cmd`、`cmd|sub`、`ACL CAT` | `tests/unit/acl.tcl:368` `tests/unit/acl.tcl:670` |
+| 命令类别与子命令 | `+@cat/-@cat`、`+cmd/-cmd`（`cmd|sub` 延期）、`ACL CAT`（依赖 ACL 子命令覆盖） | `tests/unit/acl.tcl:368` `tests/unit/acl.tcl:670` |
 | ACL LOG 与 metrics | 聚合、context、entry-id、`acllog-max-len`、`acl_access_denied_*` | `tests/unit/acl.tcl:678` `tests/unit/acl.tcl:980` |
 | HELLO/AUTH 链式语义 | `HELLO ... AUTH ... SETNAME ...` 优先级与失败回滚 | `tests/unit/acl.tcl:851` `tests/unit/acl.tcl:884` |
 | ACL 文件与配置 | `ACL LOAD/SAVE`、重复用户、注释、`acl-pubsub-default`、config rewrite | `tests/unit/acl.tcl:1003` `tests/unit/acl.tcl:1324` |
@@ -174,6 +178,7 @@
 - P0（必须）：现有 140 用例中与 `AUTH/SETUSER/GETUSER/DELUSER`、命令与 key/channel 权限、`ACL LOG`、`HELLO` 直接协议行为相关的全部 + EXT-01/02/03/07/09/10。
 - P1（建议）：ACL 文件边界与错误处理（EXT-04/05/06/08/13）。
 - P2（可选，依赖环境）：cluster internal auth、TLS cert ACL metrics（EXT-11/12）。
+- Deferred：`+cmd|sub` / `-cmd|sub` 子命令粒度授权及其 Redis 基线条目（如 `acl.tcl` 中 subcommand 相关用例）暂缓。
 
 ## 5. 运行参考（Redis 侧）
 

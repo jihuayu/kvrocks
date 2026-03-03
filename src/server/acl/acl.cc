@@ -20,13 +20,23 @@
 
 #include "acl.h"
 
+#include <algorithm>
+#include <cctype>
 #include <exception>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "acl_actions.h"
+#include "commands/error_constants.h"
+#include "commands/commander.h"
 #include "common/db_util.h"
+#include "common/string_util.h"
 #include "server/namespace.h"
 #include "server/redis_connection.h"
 #include "server/redis_reply.h"
+#include "server/server.h"
 
 namespace redis {
 
@@ -71,6 +81,77 @@ std::string DetermineNamespace(Namespace *ns_mgr, const std::string &username) {
     return kDefaultNamespace;
   }
   return ns;
+}
+
+bool HasInvalidUsernameChar(const std::string &username) {
+  return std::any_of(username.begin(), username.end(), [](char ch) {
+    const auto uch = static_cast<unsigned char>(ch);
+    return std::isspace(uch) != 0 || std::iscntrl(uch) != 0;
+  });
+}
+
+std::vector<std::string> BuildListChannels(const AclSelector &selector) {
+  auto channels = BuildSelectorChannels(selector);
+  for (auto &channel : channels) {
+    if (channel != "*") {
+      channel = "&" + channel;
+    }
+  }
+  return channels;
+}
+
+std::vector<std::string> BuildSelectorRuleTokens(const AclSelector &selector) {
+  std::vector<std::string> tokens;
+
+  auto command_rules = BuildCommandRules(selector.allowed_commands);
+  tokens.insert(tokens.end(), command_rules.begin(), command_rules.end());
+
+  auto key_rules = BuildSelectorKeys(selector);
+  tokens.insert(tokens.end(), key_rules.begin(), key_rules.end());
+
+  auto channel_rules = BuildListChannels(selector);
+  tokens.insert(tokens.end(), channel_rules.begin(), channel_rules.end());
+
+  return tokens;
+}
+
+std::string BuildAclListEntry(const std::string &username, const AclUser &user) {
+  std::vector<std::string> tokens;
+  tokens.emplace_back("user");
+  tokens.emplace_back(username);
+
+  const AclSelector *root_selector = user.allowed_commands.empty() ? nullptr : &user.allowed_commands.front();
+  auto flags = BuildUserFlags(user, root_selector);
+  tokens.insert(tokens.end(), flags.begin(), flags.end());
+
+  for (const auto &password : user.passwords) {
+    tokens.emplace_back("#" + password);
+  }
+
+  if (root_selector != nullptr) {
+    auto root_rules = BuildSelectorRuleTokens(*root_selector);
+    tokens.insert(tokens.end(), root_rules.begin(), root_rules.end());
+  }
+
+  for (size_t i = 1; i < user.allowed_commands.size(); ++i) {
+    auto selector_rules = BuildSelectorRuleTokens(user.allowed_commands[i]);
+    tokens.emplace_back("(" + util::StringJoin(selector_rules, " ") + ")");
+  }
+
+  return util::StringJoin(tokens, " ");
+}
+
+std::vector<std::string> BuildAclCategoriesReply() {
+  std::vector<std::string> categories;
+  categories.reserve(AclCategoryNames().size());
+  for (auto category : AclCategoryNames()) {
+    std::string value(category);
+    if (!value.empty() && value.front() == '@') {
+      value.erase(0, 1);
+    }
+    categories.emplace_back(std::move(value));
+  }
+  return categories;
 }
 
 }  // namespace
@@ -237,6 +318,9 @@ Status Acl::HandleSetUser(Namespace *ns_mgr, const std::string &username, const 
   if (username.empty()) {
     return {Status::RedisParseErr, errWrongNumOfArguments};
   }
+  if (HasInvalidUsernameChar(username)) {
+    return {Status::RedisParseErr, "The username contains invalid characters"};
+  }
 
   std::vector<SetUserAction> actions;
   auto merged_modifiers_or = MergeSelectorArguments(modifiers);
@@ -317,6 +401,122 @@ Status Acl::HandleWhoAmI(Connection *conn, std::string *output) {
 Status Acl::HandleUsers(Connection *conn, std::string *output) const {
   auto names = ListUsers();
   *output = conn->MultiBulkString(names);
+  return Status::OK();
+}
+
+Status Acl::HandleList(Connection *conn, std::string *output) const {
+  auto names = ListUsers();
+  std::vector<std::string> entries;
+  entries.reserve(names.size());
+
+  for (const auto &name : names) {
+    auto user = user_manager_->GetUserByUserName(name);
+    if (!user) {
+      continue;
+    }
+    entries.emplace_back(BuildAclListEntry(name, *user));
+  }
+
+  *output = conn->MultiBulkString(entries);
+  return Status::OK();
+}
+
+Status Acl::HandleCat(Connection *conn, const std::optional<std::string> &category, std::string *output) const {
+  if (!category.has_value()) {
+    *output = conn->MultiBulkString(BuildAclCategoriesReply());
+    return Status::OK();
+  }
+
+  std::string normalized = util::ToLower(category.value());
+  if (!normalized.empty() && normalized.front() == '@') {
+    normalized.erase(0, 1);
+  }
+
+  auto bitmap_or = AclCommandManager::Instance().BuildBitmapForCategory(normalized);
+  if (!bitmap_or.IsOK()) {
+    return bitmap_or.ToStatus();
+  }
+
+  auto commands = AclCommandManager::Instance().CommandsFromBitmap(bitmap_or.GetValue());
+  *output = conn->MultiBulkString(commands);
+  return Status::OK();
+}
+
+Status Acl::HandleDelUser(const std::vector<std::string> &usernames, std::string *output) {
+  if (usernames.empty()) {
+    return {Status::RedisParseErr, errWrongNumOfArguments};
+  }
+
+  int64_t deleted = 0;
+  for (const auto &username : usernames) {
+    if (util::ToLower(username) == "default") {
+      return {Status::RedisExecErr, "The 'default' user cannot be removed"};
+    }
+    if (!GetUserIndex(username).has_value()) {
+      continue;
+    }
+    auto s = Del(username);
+    if (!s.IsOK()) {
+      return s;
+    }
+    ++deleted;
+  }
+
+  *output = redis::Integer(deleted);
+  return Status::OK();
+}
+
+Status Acl::HandleDryRun(Connection *conn, const std::string &username, const std::vector<std::string> &command_tokens,
+                         std::string *output) {
+  if (username.empty() || command_tokens.empty()) {
+    return {Status::RedisParseErr, errWrongNumOfArguments};
+  }
+
+  auto user_index = GetUserIndex(username);
+  if (!user_index.has_value()) {
+    return {Status::RedisExecErr, "ACL user does not exist"};
+  }
+
+  auto user = GetCachedUserByIndex(*user_index);
+  if (!user) {
+    return {Status::RedisExecErr, "ACL user does not exist"};
+  }
+
+  auto cmd_or = Server::LookupAndCreateCommand(command_tokens.front());
+  if (!cmd_or.IsOK()) {
+    return cmd_or.ToStatus();
+  }
+
+  auto cmd = std::move(cmd_or.GetValue());
+  const auto *attributes = cmd->GetAttributes();
+  if (!attributes->CheckArity(static_cast<int>(command_tokens.size()))) {
+    return {Status::RedisExecErr, "wrong number of arguments"};
+  }
+  cmd->SetArgs(command_tokens);
+  auto parse_status = cmd->Parse();
+  if (!parse_status.IsOK()) {
+    return parse_status;
+  }
+
+  const bool had_acl_profile = conn->HasAclProfile();
+  const std::string previous_username = conn->GetAclUsername();
+  const size_t previous_user_index = conn->GetAclUserIndex();
+  auto previous_user = had_acl_profile ? GetCachedUserByIndex(previous_user_index) : nullptr;
+
+  conn->SetAclProfile(username, *user_index, user);
+  auto acl_status = conn->CheckAclCommandAllowed(this, attributes, command_tokens,
+                                                 attributes->GenerateFlags(command_tokens, *conn->GetServer()->GetConfig()));
+  if (had_acl_profile && previous_user) {
+    conn->SetAclProfile(previous_username, previous_user_index, previous_user);
+  } else {
+    conn->ClearAclProfile();
+  }
+
+  if (!acl_status.IsOK()) {
+    return acl_status;
+  }
+
+  *output = redis::RESP_OK;
   return Status::OK();
 }
 

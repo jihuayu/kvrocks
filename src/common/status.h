@@ -56,6 +56,7 @@ class [[nodiscard]] Status {
     RedisMasterDown,
     RedisNoScript,
     RedisNoAuth,
+    RedisNoPerm,
     RedisWrongType,
     RedisReadOnly,
     RedisExecAbort,

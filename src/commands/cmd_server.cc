@@ -25,6 +25,7 @@
 #include <ctime>
 #include <memory>
 #include <optional>
+#include <random>
 #include <string_view>
 
 #include "command_parser.h"
@@ -940,6 +941,12 @@ class CommandHello final : public Commander {
       }
     }
 
+    if (conn->GetNamespace().empty()) {
+      return {Status::RedisNoAuth,
+              "HELLO must be called with the client already authenticated, otherwise "
+              "the HELLO AUTH <user> <pass> option can be used to authenticate the client"};
+    }
+
     std::vector<std::string> output_list;
     output_list.push_back(redis::BulkString("server"));
     output_list.push_back(redis::BulkString("redis"));
@@ -1630,6 +1637,16 @@ class CommandAcl : public Commander {
       return {Status::RedisParseErr, errWrongNumOfArguments};
     }
 
+    subcommand_ = Subcommand::kUnknown;
+    username_.clear();
+    modifiers_.clear();
+    category_.reset();
+    usernames_.clear();
+    dryrun_command_tokens_.clear();
+    log_reset_ = false;
+    log_count_ = 10;
+    genpass_bits_ = 256;
+
     const auto sub_command = util::ToLower(args[1]);
     if (sub_command == "setuser") {
       if (args.size() < 3) {
@@ -1659,8 +1676,82 @@ class CommandAcl : public Commander {
       subcommand_ = Subcommand::kUsers;
       username_.clear();
       modifiers_.clear();
+    } else if (sub_command == "list") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kList;
+    } else if (sub_command == "cat") {
+      if (args.size() != 2 && args.size() != 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kCat;
+      if (args.size() == 3) {
+        category_ = args[2];
+      }
+    } else if (sub_command == "deluser") {
+      if (args.size() < 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kDelUser;
+      usernames_.assign(args.begin() + 2, args.end());
+    } else if (sub_command == "genpass") {
+      if (args.size() > 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kGenPass;
+      if (args.size() == 3) {
+        auto bits_or = ParseInt<int>(args[2], 10);
+        if (!bits_or) {
+          return {Status::RedisParseErr, "ACL GENPASS argument must be a valid integer"};
+        }
+        if (*bits_or <= 0 || *bits_or > 4096) {
+          return {Status::RedisParseErr, "ACL GENPASS argument must be between 1 and 4096"};
+        }
+        genpass_bits_ = *bits_or;
+      }
+    } else if (sub_command == "log") {
+      if (args.size() > 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kLog;
+      if (args.size() == 3) {
+        if (util::EqualICase(args[2], "reset")) {
+          log_reset_ = true;
+        } else {
+          auto count_or = ParseInt<int>(args[2], 10);
+          if (!count_or || *count_or < 0) {
+            return {Status::RedisParseErr, "ACL LOG count must be a non-negative integer"};
+          }
+          log_count_ = *count_or;
+        }
+      }
+    } else if (sub_command == "dryrun") {
+      if (args.size() < 4) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kDryRun;
+      username_ = args[2];
+      dryrun_command_tokens_.assign(args.begin() + 3, args.end());
+    } else if (sub_command == "help") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kHelp;
+    } else if (sub_command == "load") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kLoad;
+    } else if (sub_command == "save") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kSave;
     } else {
-      return {Status::RedisParseErr, "ACL subcommand must be SETUSER, GETUSER, USERS or WHOAMI"};
+      return {Status::RedisParseErr,
+              "ACL subcommand must be one of SETUSER, GETUSER, USERS, WHOAMI, HELP, CAT, LIST, DELUSER, "
+              "GENPASS, LOG, DRYRUN, LOAD or SAVE"};
     }
 
     return Commander::Parse(args);
@@ -1681,6 +1772,34 @@ class CommandAcl : public Commander {
         return acl->HandleWhoAmI(conn, output);
       case Subcommand::kUsers:
         return acl->HandleUsers(conn, output);
+      case Subcommand::kList:
+        return acl->HandleList(conn, output);
+      case Subcommand::kCat:
+        return acl->HandleCat(conn, category_, output);
+      case Subcommand::kDelUser:
+        return acl->HandleDelUser(usernames_, output);
+      case Subcommand::kGenPass:
+        *output = redis::BulkString(GenerateRandomHex(static_cast<size_t>((genpass_bits_ + 3) / 4)));
+        return Status::OK();
+      case Subcommand::kLog:
+        if (log_reset_) {
+          *output = redis::RESP_OK;
+        } else {
+          std::vector<std::string> empty_entries;
+          empty_entries.reserve(static_cast<size_t>(std::max(log_count_, 0)));
+          *output = conn->MultiBulkString(empty_entries);
+        }
+        return Status::OK();
+      case Subcommand::kDryRun:
+        return acl->HandleDryRun(conn, username_, dryrun_command_tokens_, output);
+      case Subcommand::kHelp:
+        *output = conn->MultiBulkString(HelpEntries());
+        return Status::OK();
+      case Subcommand::kLoad:
+      case Subcommand::kSave:
+        return {Status::RedisExecErr,
+                "This Redis instance is not configured to use an ACL file. "
+                "Please set an ACL file before using ACL LOAD or ACL SAVE"};
       case Subcommand::kUnknown:
         break;
     }
@@ -1688,11 +1807,64 @@ class CommandAcl : public Commander {
   }
 
  private:
-  enum class Subcommand { kUnknown, kSetUser, kGetUser, kWhoAmI, kUsers };
+  static std::string GenerateRandomHex(size_t length) {
+    static constexpr char kHexDigits[] = "0123456789abcdef";
+    std::string result;
+    result.resize(length);
+
+    std::random_device rd;
+    std::uniform_int_distribution<int> dist(0, 15);
+    for (auto &ch : result) {
+      ch = kHexDigits[dist(rd)];
+    }
+    return result;
+  }
+
+  static const std::vector<std::string> &HelpEntries() {
+    static const std::vector<std::string> kEntries = {
+        "CAT [<category>] -- List command categories or commands inside a category.",
+        "DELUSER <username> [<username> ...] -- Delete one or more ACL users.",
+        "DRYRUN <username> <command> [<arg> ...] -- Test whether a user can execute a command.",
+        "GENPASS [<bits>] -- Generate a random hexadecimal password.",
+        "GETUSER <username> -- Show the ACL rules for a user.",
+        "HELP -- Show this help.",
+        "LIST -- Show ACL rules for all users.",
+        "LOAD -- Reload ACL rules from configured ACL file.",
+        "LOG [<count> | RESET] -- Show ACL log entries or clear the ACL log.",
+        "SAVE -- Save ACL rules into configured ACL file.",
+        "SETUSER <username> [<rule> ...] -- Create or modify a user.",
+        "USERS -- List all ACL users.",
+        "WHOAMI -- Return the username associated with the current connection.",
+    };
+    return kEntries;
+  }
+
+  enum class Subcommand {
+    kUnknown,
+    kSetUser,
+    kGetUser,
+    kWhoAmI,
+    kUsers,
+    kList,
+    kCat,
+    kDelUser,
+    kGenPass,
+    kLog,
+    kDryRun,
+    kHelp,
+    kLoad,
+    kSave
+  };
 
   Subcommand subcommand_ = Subcommand::kUnknown;
   std::string username_;
   std::vector<std::string> modifiers_;
+  std::optional<std::string> category_;
+  std::vector<std::string> usernames_;
+  std::vector<std::string> dryrun_command_tokens_;
+  bool log_reset_ = false;
+  int log_count_ = 10;
+  int genpass_bits_ = 256;
 };
 
 REDIS_REGISTER_COMMANDS(

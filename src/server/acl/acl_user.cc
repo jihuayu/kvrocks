@@ -28,6 +28,7 @@ namespace {
 
 constexpr const char *kJsonFieldEnabled = "enabled";
 constexpr const char *kJsonFieldNoPass = "nopass";
+constexpr const char *kJsonFieldSanitizePayload = "sanitize_payload";
 constexpr const char *kJsonFieldNamespace = "namespace";
 constexpr const char *kJsonFieldPasswords = "passwords";
 constexpr const char *kJsonFieldSelectors = "selectors";
@@ -171,6 +172,7 @@ jsoncons::json AclUser::ToJson() const {
   jsoncons::json json;
   json[kJsonFieldEnabled] = enabled;
   json[kJsonFieldNoPass] = nopass;
+  json[kJsonFieldSanitizePayload] = sanitize_payload;
   json[kJsonFieldNamespace] = ns;
 
   jsoncons::json passwords_array(jsoncons::json_array_arg);
@@ -211,6 +213,16 @@ StatusOr<AclUser> AclUser::FromJson(const jsoncons::json &json) {
     user.nopass = json[kJsonFieldNoPass].as<bool>();
   }
 
+  if (json.contains(kJsonFieldSanitizePayload)) {
+    if (!json[kJsonFieldSanitizePayload].is_bool()) {
+      return {Status::NotOK, "sanitize_payload must be a boolean"};
+    }
+    user.sanitize_payload = json[kJsonFieldSanitizePayload].as<bool>();
+  } else {
+    // Backward compatibility with older persisted ACL schema.
+    user.sanitize_payload = true;
+  }
+
   if (!json[kJsonFieldNamespace].is_string()) {
     return {Status::NotOK, "namespace must be a string"};
   }
@@ -248,6 +260,7 @@ StatusOr<AclUser> AclUser::FromJson(const jsoncons::json &json) {
 void ResetUserState(AclUser &user) {
   user.enabled = false;
   user.nopass = false;
+  user.sanitize_payload = true;
   user.passwords.clear();
   user.allowed_commands.clear();
   AclSelector root{};

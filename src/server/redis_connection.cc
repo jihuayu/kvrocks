@@ -327,13 +327,13 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
   auto cached_user = acl->GetCachedUserByIndex(acl_user_index_);
   if (!cached_user) {
     ClearAclProfile();
-    return {Status::RedisExecErr, "ACL user context is not available"};
+    return {Status::RedisNoPerm, "ACL user context is not available"};
   }
 
   acl_user_ = std::move(cached_user);
 
   if (!acl_user_->enabled) {
-    return {Status::RedisExecErr, "ACL user is disabled"};
+    return {Status::RedisNoPerm, "ACL user is disabled"};
   }
 
   const auto command = util::ToLower(attributes->name);
@@ -350,7 +350,7 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
     return Status::OK();
   }
 
-  return {Status::RedisExecErr, fmt::format("ACL user is not allowed to run `{}`", command)};
+  return {Status::RedisNoPerm, fmt::format("ACL user is not allowed to run `{}`", command)};
 }
 
 void Connection::SubscribeChannel(const std::string &channel) {
@@ -579,12 +579,30 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
 
     auto cmd_flags = attributes->GenerateFlags(cmd_tokens, *config);
     if (GetNamespace().empty()) {
-      if (!password.empty()) {
+      bool require_auth = !password.empty();
+      if (config->acl_preview_enabled) {
+        require_auth = false;
+        auto default_user_index = srv_->GetAcl()->GetUserIndex("default");
+        if (default_user_index.has_value()) {
+          auto default_user = srv_->GetAcl()->GetCachedUserByIndex(default_user_index.value());
+          if (default_user && default_user->enabled && default_user->nopass) {
+            BecomeUser();
+            SetNamespace(default_user->ns.empty() ? kDefaultNamespace : default_user->ns);
+            SetAclProfile("default", default_user_index.value(), std::move(default_user));
+          } else {
+            require_auth = true;
+          }
+        } else if (!password.empty()) {
+          require_auth = true;
+        }
+      }
+
+      if (require_auth) {
         if (!(cmd_flags & kCmdAuth)) {
           Reply(redis::Error({Status::RedisNoAuth, "Authentication required."}));
           continue;
         }
-      } else {
+      } else if (GetNamespace().empty()) {
         BecomeAdmin();
         SetNamespace(kDefaultNamespace);
       }

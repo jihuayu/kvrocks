@@ -33,6 +33,8 @@
 
 namespace redis {
 
+bool CommandBitmapIsAll(const std::vector<uint64_t> &bitmap);
+
 namespace {
 
 template <typename... Ts>
@@ -59,7 +61,6 @@ std::vector<T> NormalizeBitmap(const std::vector<T> &bitmap) {
 }
 
 inline void TrimCommandBitmap(std::vector<uint64_t> &bitmap) { TrimBitmap(bitmap); }
-bool CommandBitmapIsAll(const std::vector<uint64_t> &bitmap);
 
 void BitOrBitmap(std::vector<uint64_t> &dst, const std::vector<uint64_t> &src) {
   if (dst.size() < src.size()) {
@@ -249,6 +250,7 @@ Status ApplySelectorAction(AclUser &user, const SelectorAction &action) {
           std::holds_alternative<ResetPassAction>(nested_action) || std::holds_alternative<NoPassAction>(nested_action) ||
           std::holds_alternative<PasswordAction>(nested_action) ||
           std::holds_alternative<ClearSelectorsAction>(nested_action) ||
+          std::holds_alternative<SanitizePayloadAction>(nested_action) ||
           std::holds_alternative<SelectorAction>(nested_action)) {
         return {Status::RedisParseErr, "ACL selector only supports command/key/channel modifiers"};
       }
@@ -327,6 +329,14 @@ Status ParseSetUserToken(const std::string &token, std::vector<SetUserAction> *a
   }
   if (lowered == "nopass") {
     actions->emplace_back(NoPassAction{});
+    return Status::OK();
+  }
+  if (lowered == "sanitize-payload") {
+    actions->emplace_back(SanitizePayloadAction{true});
+    return Status::OK();
+  }
+  if (lowered == "skip-sanitize-payload") {
+    actions->emplace_back(SanitizePayloadAction{false});
     return Status::OK();
   }
   if (lowered == "clearselectors") {
@@ -510,11 +520,15 @@ Status ApplySetUserAction(AclUser &user, const SetUserAction &action) {
                     user.nopass = false;
                     return Status::OK();
                   },
-                  [&](const NoPassAction &) -> Status {
+                 [&](const NoPassAction &) -> Status {
                     user.passwords.clear();
                     user.nopass = true;
                     return Status::OK();
                   },
+                 [&](const SanitizePayloadAction &sanitize) -> Status {
+                   user.sanitize_payload = sanitize.enabled;
+                   return Status::OK();
+                 },
                  [&](const ClearSelectorsAction &) -> Status {
                    if (user.allowed_commands.size() > 1) {
                      user.allowed_commands.erase(user.allowed_commands.begin() + 1, user.allowed_commands.end());
@@ -669,6 +683,7 @@ std::vector<std::string> BuildUserFlags(const AclUser &user, const AclSelector *
   if (user.nopass) {
     flags.emplace_back("nopass");
   }
+  flags.emplace_back(user.sanitize_payload ? "sanitize-payload" : "skip-sanitize-payload");
 
   if (root_selector != nullptr) {
     auto selector_flags = BuildSelectorFlags(*root_selector);
@@ -727,8 +742,6 @@ std::string FormatAclUser(Connection *conn, const AclUser &user) {
     selector_replies.emplace_back(BuildSelectorReply(conn, user.allowed_commands[i]));
   }
   entries.emplace_back("selectors", redis::Array(selector_replies));
-
-  entries.emplace_back("namespace", redis::BulkString(user.ns));
 
   return BuildMapReply(conn, entries);
 }

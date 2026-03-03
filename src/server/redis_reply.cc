@@ -27,6 +27,7 @@ const std::map<Status::Code, std::string> redisErrorPrefixMapping = {
     {Status::RedisErrorNoPrefix, ""},          {Status::RedisNoProto, "NOPROTO"},
     {Status::RedisLoading, "LOADING"},         {Status::RedisMasterDown, "MASTERDOWN"},
     {Status::RedisNoScript, "NOSCRIPT"},       {Status::RedisNoAuth, "NOAUTH"},
+    {Status::RedisNoPerm, "NOPERM"},
     {Status::RedisWrongType, "WRONGTYPE"},     {Status::RedisReadOnly, "READONLY"},
     {Status::RedisExecAbort, "EXECABORT"},     {Status::RedisMoved, "MOVED"},
     {Status::RedisCrossSlot, "CROSSSLOT"},     {Status::RedisTryAgain, "TRYAGAIN"},

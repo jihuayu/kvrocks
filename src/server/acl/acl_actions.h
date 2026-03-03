@@ -39,6 +39,9 @@ struct ResetUserAction {};
 struct ResetPassAction {};
 struct NoPassAction {};
 struct ClearSelectorsAction {};
+struct SanitizePayloadAction {
+  bool enabled;
+};
 
 struct PasswordAction {
   enum class Kind { kAddPlain, kRemovePlain, kAddHashed, kRemoveHashed };
@@ -81,7 +84,7 @@ struct SelectorAction {
 
 using SetUserAction = std::variant<EnableAction, DisableAction, ResetUserAction, ResetPassAction, NoPassAction,
                                    PasswordAction, CommandToggleAction, CategoryToggleAction, KeyPatternAction,
-                                   ChannelPatternAction, ClearSelectorsAction, SelectorAction>;
+                                   ChannelPatternAction, ClearSelectorsAction, SanitizePayloadAction, SelectorAction>;
 
 // Parse a single token from ACL SETUSER command into actions
 Status ParseSetUserToken(const std::string &token, std::vector<SetUserAction> *actions);

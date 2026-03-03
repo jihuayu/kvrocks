@@ -62,6 +62,11 @@ class Acl {
   Status HandleGetUser(Connection *conn, const std::string &username, std::string *output);
   static Status HandleWhoAmI(Connection *conn, std::string *output);
   Status HandleUsers(Connection *conn, std::string *output) const;
+  Status HandleList(Connection *conn, std::string *output) const;
+  Status HandleCat(Connection *conn, const std::optional<std::string> &category, std::string *output) const;
+  Status HandleDelUser(const std::vector<std::string> &usernames, std::string *output);
+  Status HandleDryRun(Connection *conn, const std::string &username, const std::vector<std::string> &command_tokens,
+                      std::string *output);
 
   // Replication-related methods for applying ACL changes from master
   Status ApplyReplicatedUpdate(const std::string &username, const std::string &value);

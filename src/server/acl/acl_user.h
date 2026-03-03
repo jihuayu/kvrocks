@@ -76,6 +76,7 @@ class AclUser {
  public:
   bool enabled = false;                       // Whether the user is enabled
   bool nopass = false;                        // Whether any password is accepted (Redis "nopass")
+  bool sanitize_payload = true;               // Whether command payload should be sanitized in ACL logs
   std::string ns;                             // Namespace of the user
   std::vector<AclSelector> allowed_commands;  // The first is the root selector, the rest are regular selectors
   std::set<std::string> passwords;            // Set of passwords, stored as sha256 hashes
