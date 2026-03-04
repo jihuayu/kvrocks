@@ -21,6 +21,7 @@
 #include "commander.h"
 
 #include "cluster/cluster_defs.h"
+#include "server/acl.h"
 #include "server/redis_reply.h"
 
 namespace redis {
@@ -34,8 +35,10 @@ RegisterToCommandTable::RegisterToCommandTable(CommandCategory category,
   for (auto attr : list) {
     attr.category = category;
     CommandTable::redis_command_table.emplace_back(attr);
-    CommandTable::original_commands[attr.name] = &CommandTable::redis_command_table.back();
-    CommandTable::commands[attr.name] = &CommandTable::redis_command_table.back();
+    auto &stored_attr = CommandTable::redis_command_table.back();
+    CommandTable::original_commands[stored_attr.name] = &stored_attr;
+    CommandTable::commands[stored_attr.name] = &stored_attr;
+    redis::AclCommandManager::Instance().RegisterCommand(stored_attr.name, stored_attr.category);
   }
 }
 

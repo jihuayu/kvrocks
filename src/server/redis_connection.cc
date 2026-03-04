@@ -31,6 +31,7 @@
 #include "fmt/ostream.h"
 #include "logging.h"
 #include "search/indexer.h"
+#include "server/acl.h"
 #include "server/redis_reply.h"
 #include "string_util.h"
 #ifdef ENABLE_OPENSSL
@@ -224,6 +225,151 @@ bool Connection::CanMigrate() const {
          && !IsFlagEnabled(redis::Connection::kCloseAfterReply)          // close after reply
          && saved_current_command_ == nullptr                            // not executing blocking command like BLPOP
          && subscribe_channels_.empty() && subscribe_patterns_.empty();  // not subscribing any channel
+}
+
+void Connection::SetAclProfile(const std::string &username, size_t user_index, std::shared_ptr<const AclUser> user) {
+  acl_enforced_ = true;
+  acl_username_ = username;
+  acl_user_index_ = user_index;
+  acl_user_ = std::move(user);
+}
+
+void Connection::ClearAclProfile() {
+  acl_enforced_ = false;
+  acl_username_.clear();
+  acl_user_index_ = kInvalidAclUserIndex;
+  acl_user_.reset();
+}
+
+namespace {
+
+bool SelectorAllowsCommand(const redis::AclSelector &selector, const std::string &command) {
+  if ((selector.flags & redis::kAclSelectorAllCommands) != 0) {
+    return true;
+  }
+  auto &manager = redis::AclCommandManager::Instance();
+  return manager.IsCommandAllowed(selector.allowed_commands, command);
+}
+
+uint32_t CommandRequiredKeyPerm(uint64_t cmd_flags) {
+  return (cmd_flags & redis::kCmdWrite) ? redis::kAclKeyWrite : redis::kAclKeyRead;
+}
+
+bool SelectorAllowsKey(const redis::AclSelector &selector, const std::string &key, uint32_t required_perm) {
+  if ((selector.flags & redis::kAclSelectorAllKeys) != 0) {
+    return true;
+  }
+  for (const auto &pattern : selector.key_patterns) {
+    if ((pattern.flags & required_perm) == 0) {
+      continue;
+    }
+    if (util::StringMatch(pattern.pattern, key, false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool SelectorAllowsKeys(const redis::AclSelector &selector, const CommandAttributes *attributes,
+                        const std::vector<std::string> &cmd_tokens, uint64_t cmd_flags) {
+  bool has_key = false;
+  bool denied = false;
+  const auto required_perm = CommandRequiredKeyPerm(cmd_flags);
+  attributes->ForEachKeyRange(
+      [&](const std::vector<std::string> &args, const redis::CommandKeyRange &key_range) {
+        key_range.ForEachKey(
+            [&](const std::string &key) {
+              has_key = true;
+              if (!SelectorAllowsKey(selector, key, required_perm)) {
+                denied = true;
+              }
+            },
+            args);
+      },
+      cmd_tokens, [](const auto &) {});
+  return !has_key || !denied;
+}
+
+enum class ChannelMatchMode { kGlob, kLiteral };
+
+bool MatchSelectorChannel(const redis::AclSelector &selector, const std::string &channel, ChannelMatchMode mode) {
+  if ((selector.flags & redis::kAclSelectorAllChannels) != 0) {
+    return true;
+  }
+  for (const auto &pattern : selector.channels) {
+    if (mode == ChannelMatchMode::kLiteral) {
+      if (pattern == channel) {
+        return true;
+      }
+    } else if (util::StringMatch(pattern, channel, false)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool SelectorAllowsChannels(const redis::AclSelector &selector, const std::string &command,
+                            const std::vector<std::string> &cmd_tokens) {
+  if (cmd_tokens.size() <= 1) {
+    return true;
+  }
+
+  bool is_channel_command = false;
+  ChannelMatchMode match_mode = ChannelMatchMode::kGlob;
+  if (command == "publish" || command == "spublish" || command == "subscribe" || command == "ssubscribe") {
+    is_channel_command = true;
+  } else if (command == "psubscribe") {
+    is_channel_command = true;
+    match_mode = ChannelMatchMode::kLiteral;
+  }
+
+  if (!is_channel_command) {
+    return true;
+  }
+
+  for (size_t i = 1; i < cmd_tokens.size(); ++i) {
+    if (!MatchSelectorChannel(selector, cmd_tokens[i], match_mode)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *attributes,
+                                          const std::vector<std::string> &cmd_tokens, uint64_t cmd_flags) {
+  if (!acl_enforced_) {
+    return Status::OK();
+  }
+
+  auto cached_user = acl->GetCachedUserByIndex(acl_user_index_);
+  if (!cached_user) {
+    ClearAclProfile();
+    return {Status::RedisNoPerm, "ACL user context is not available"};
+  }
+
+  acl_user_ = std::move(cached_user);
+
+  if (!acl_user_->enabled) {
+    return {Status::RedisNoPerm, "ACL user is disabled"};
+  }
+
+  const auto command = util::ToLower(attributes->name);
+  for (const auto &selector : acl_user_->allowed_commands) {
+    if (!SelectorAllowsCommand(selector, command)) {
+      continue;
+    }
+    if (!SelectorAllowsKeys(selector, attributes, cmd_tokens, cmd_flags)) {
+      continue;
+    }
+    if (!SelectorAllowsChannels(selector, command, cmd_tokens)) {
+      continue;
+    }
+    return Status::OK();
+  }
+
+  return {Status::RedisNoPerm, fmt::format("ACL user is not allowed to run `{}`", command)};
 }
 
 void Connection::SubscribeChannel(const std::string &channel) {
@@ -452,12 +598,30 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
 
     auto cmd_flags = attributes->GenerateFlags(cmd_tokens, *config);
     if (GetNamespace().empty()) {
-      if (!password.empty()) {
+      bool require_auth = !password.empty();
+      if (config->acl_preview_enabled) {
+        require_auth = false;
+        auto default_user_index = srv_->GetAcl()->GetUserIndex("default");
+        if (default_user_index.has_value()) {
+          auto default_user = srv_->GetAcl()->GetCachedUserByIndex(default_user_index.value());
+          if (default_user && default_user->enabled && default_user->nopass) {
+            BecomeUser();
+            SetNamespace(default_user->ns.empty() ? kDefaultNamespace : default_user->ns);
+            SetAclProfile("default", default_user_index.value(), std::move(default_user));
+          } else {
+            require_auth = true;
+          }
+        } else if (!password.empty()) {
+          require_auth = true;
+        }
+      }
+
+      if (require_auth) {
         if (!(cmd_flags & kCmdAuth)) {
           Reply(redis::Error({Status::RedisNoAuth, "Authentication required."}));
           continue;
         }
-      } else {
+      } else if (GetNamespace().empty()) {
         BecomeAdmin();
         SetNamespace(kDefaultNamespace);
       }
@@ -510,6 +674,14 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
     // reset the ASKING flag after executing the next query
     if (IsFlagEnabled(kAsking)) {
       DisableFlag(kAsking);
+    }
+
+    if (config->acl_preview_enabled && !IsAdmin() && HasAclProfile()) {
+      auto acl_status = CheckAclCommandAllowed(srv_->GetAcl(), attributes, cmd_tokens, cmd_flags);
+      if (!acl_status.IsOK()) {
+        Reply(redis::Error(acl_status));
+        continue;
+      }
     }
 
     multi_error_exit.Disable();

@@ -58,6 +58,7 @@ enum WriteBatchType {
   kBatchTypePublish,
   kBatchTypePropagate,
   kBatchTypeStream,
+  kBatchTypePropagateDelete,
 };
 
 using FetchFileCallback = std::function<void(const std::string &, uint32_t)>;
@@ -231,8 +232,11 @@ class ReplicationThread : private EventCallbackBase<ReplicationThread> {
 class WriteBatchHandler : public rocksdb::WriteBatch::Handler {
  public:
   rocksdb::Status PutCF(uint32_t column_family_id, const rocksdb::Slice &key, const rocksdb::Slice &value) override;
-  rocksdb::Status DeleteCF([[maybe_unused]] uint32_t column_family_id,
-                           [[maybe_unused]] const rocksdb::Slice &key) override {
+  rocksdb::Status DeleteCF(uint32_t column_family_id, const rocksdb::Slice &key) override {
+    if (column_family_id == static_cast<uint32_t>(ColumnFamilyID::Propagate)) {
+      type_ = kBatchTypePropagateDelete;
+      kv_ = std::make_pair(key.ToString(), std::string());
+    }
     return rocksdb::Status::OK();
   }
   rocksdb::Status DeleteRangeCF([[maybe_unused]] uint32_t column_family_id,

@@ -20,12 +20,19 @@
 
 #include <storage/batch_extractor.h>
 
+#include <algorithm>
+#include <cctype>
 #include <ctime>
+#include <memory>
+#include <optional>
+#include <random>
+#include <string_view>
 
 #include "command_parser.h"
 #include "commander.h"
 #include "commands/scan_base.h"
 #include "common/io_util.h"
+#include "common/parse_util.h"
 #include "common/rdb_stream.h"
 #include "common/string_util.h"
 #include "common/time_util.h"
@@ -36,23 +43,53 @@
 #include "server/server.h"
 #include "stats/disk_stats.h"
 #include "storage/rdb/rdb.h"
+#include "vendor/sha256.h"
 
 namespace redis {
 
 class CommandAuth : public Commander {
  public:
+  Status Parse(const std::vector<std::string> &args) override {
+    if (args.size() == 2) {
+      has_username_ = false;
+      username_.clear();
+      password_ = args[1];
+      return Status::OK();
+    }
+    if (args.size() == 3) {
+      has_username_ = true;
+      username_ = args[1];
+      password_ = args[2];
+      return Status::OK();
+    }
+    return {Status::RedisParseErr, errWrongNumOfArguments};
+  }
+
   Status Execute([[maybe_unused]] engine::Context &ctx, Server *srv, Connection *conn, std::string *output) override {
-    auto &user_password = args_[1];
     std::string ns;
-    AuthResult result = srv->AuthenticateUser(user_password, &ns);
+    std::shared_ptr<const redis::AclUser> acl_user;
+    size_t acl_user_index = Connection::kInvalidAclUserIndex;
+    AuthResult result = has_username_ ? srv->AuthenticateUser(username_, password_, &ns, &acl_user, &acl_user_index)
+                                      : srv->AuthenticateUser(password_, &ns, &acl_user, &acl_user_index);
+    conn->ClearAclProfile();
     switch (result) {
       case AuthResult::NO_REQUIRE_PASS:
         return {Status::RedisExecErr, "Client sent AUTH, but no password is set"};
       case AuthResult::INVALID_PASSWORD:
         return {Status::RedisExecErr, "Invalid password"};
-      case AuthResult::IS_USER:
+      case AuthResult::IS_USER: {
         conn->BecomeUser();
+        if (acl_user && acl_user_index != Connection::kInvalidAclUserIndex) {
+          std::string profile_name = has_username_ ? username_ : "default";
+          if (!has_username_) {
+            if (auto username_or = srv->GetAcl()->GetUsernameByIndex(acl_user_index); username_or.has_value()) {
+              profile_name = username_or.value();
+            }
+          }
+          conn->SetAclProfile(profile_name, acl_user_index, acl_user);
+        }
         break;
+      }
       case AuthResult::IS_ADMIN:
         conn->BecomeAdmin();
         break;
@@ -61,6 +98,11 @@ class CommandAuth : public Commander {
     *output = redis::RESP_OK;
     return Status::OK();
   }
+
+ private:
+  std::string username_;
+  std::string password_;
+  bool has_username_ = false;
 };
 
 class CommandNamespace : public Commander {
@@ -856,40 +898,79 @@ class CommandHello final : public Commander {
     }
 
     // Handling AUTH and SETNAME
-    for (; next_arg < args_.size(); ++next_arg) {
-      size_t more_args = args_.size() - next_arg - 1;
+    while (next_arg < args_.size()) {
       const std::string &opt = args_[next_arg];
-      if (util::ToLower(opt) == "auth" && more_args != 0) {
-        if (more_args == 2 || more_args == 4) {
-          if (args_[next_arg + 1] != "default") {
-            return {Status::NotOK, "Invalid password"};
-          }
-          next_arg++;
+      auto lower_opt = util::ToLower(opt);
+      if (lower_opt == "auth") {
+        size_t remaining = args_.size() - next_arg - 1;
+        if (remaining == 0) {
+          return {Status::RedisExecErr, "Syntax error in HELLO option auth"};
         }
-        const auto &user_password = args_[next_arg + 1];
+
+        std::string auth_username;
+        std::string auth_password;
+        if (remaining >= 2) {
+          auto next_token = util::ToLower(args_[next_arg + 2]);
+          if (next_token == "setname" || next_token == "auth") {
+            auth_password = args_[next_arg + 1];
+            next_arg += 2;
+          } else {
+            auth_username = args_[next_arg + 1];
+            auth_password = args_[next_arg + 2];
+            next_arg += 3;
+          }
+        } else {
+          auth_password = args_[next_arg + 1];
+          next_arg += 2;
+        }
+
         std::string ns;
-        AuthResult auth_result = srv->AuthenticateUser(user_password, &ns);
+        std::shared_ptr<const redis::AclUser> acl_user;
+        size_t acl_user_index = Connection::kInvalidAclUserIndex;
+        AuthResult auth_result =
+            auth_username.empty()
+                ? srv->AuthenticateUser(auth_password, &ns, &acl_user, &acl_user_index)
+                : srv->AuthenticateUser(auth_username, auth_password, &ns, &acl_user, &acl_user_index);
+        conn->ClearAclProfile();
         switch (auth_result) {
           case AuthResult::NO_REQUIRE_PASS:
             return {Status::NotOK, "Client sent AUTH, but no password is set"};
           case AuthResult::INVALID_PASSWORD:
             return {Status::NotOK, "Invalid password"};
-          case AuthResult::IS_USER:
+          case AuthResult::IS_USER: {
             conn->BecomeUser();
+            if (acl_user && acl_user_index != Connection::kInvalidAclUserIndex) {
+              std::string profile_name = auth_username.empty() ? "default" : auth_username;
+              if (auth_username.empty()) {
+                if (auto username_or = srv->GetAcl()->GetUsernameByIndex(acl_user_index); username_or.has_value()) {
+                  profile_name = username_or.value();
+                }
+              }
+              conn->SetAclProfile(profile_name, acl_user_index, acl_user);
+            }
             break;
+          }
           case AuthResult::IS_ADMIN:
             conn->BecomeAdmin();
             break;
         }
         conn->SetNamespace(ns);
-        next_arg += 1;
-      } else if (util::ToLower(opt) == "setname" && more_args != 0) {
-        const std::string &name = args_[next_arg + 1];
-        conn->SetName(name);
-        next_arg += 1;
+      } else if (lower_opt == "setname") {
+        size_t remaining = args_.size() - next_arg - 1;
+        if (remaining == 0) {
+          return {Status::RedisExecErr, "Syntax error in HELLO option setname"};
+        }
+        conn->SetName(args_[next_arg + 1]);
+        next_arg += 2;
       } else {
         return {Status::RedisExecErr, "Syntax error in HELLO option " + opt};
       }
+    }
+
+    if (conn->GetNamespace().empty()) {
+      return {Status::RedisNoAuth,
+              "HELLO must be called with the client already authenticated, otherwise "
+              "the HELLO AUTH <user> <pass> option can be used to authenticate the client"};
     }
 
     std::vector<std::string> output_list;
@@ -1575,8 +1656,245 @@ class CommandFlushBlockCache : public Commander {
   }
 };
 
+class CommandAcl : public Commander {
+ public:
+  Status Parse(const std::vector<std::string> &args) override {
+    if (args.size() < 2) {
+      return {Status::RedisParseErr, errWrongNumOfArguments};
+    }
+
+    subcommand_ = Subcommand::kUnknown;
+    username_.clear();
+    modifiers_.clear();
+    category_.reset();
+    usernames_.clear();
+    dryrun_command_tokens_.clear();
+    log_reset_ = false;
+    log_count_ = 10;
+    genpass_bits_ = 256;
+
+    const auto sub_command = util::ToLower(args[1]);
+    if (sub_command == "setuser") {
+      if (args.size() < 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kSetUser;
+      username_ = args[2];
+      modifiers_.assign(args.begin() + 3, args.end());
+    } else if (sub_command == "getuser") {
+      if (args.size() != 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kGetUser;
+      username_ = args[2];
+      modifiers_.clear();
+    } else if (sub_command == "whoami") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kWhoAmI;
+      username_.clear();
+      modifiers_.clear();
+    } else if (sub_command == "users") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kUsers;
+      username_.clear();
+      modifiers_.clear();
+    } else if (sub_command == "list") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kList;
+    } else if (sub_command == "cat") {
+      if (args.size() != 2 && args.size() != 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kCat;
+      if (args.size() == 3) {
+        category_ = args[2];
+      }
+    } else if (sub_command == "deluser") {
+      if (args.size() < 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kDelUser;
+      usernames_.assign(args.begin() + 2, args.end());
+    } else if (sub_command == "genpass") {
+      if (args.size() > 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kGenPass;
+      if (args.size() == 3) {
+        auto bits_or = ParseInt<int>(args[2], 10);
+        if (!bits_or) {
+          return {Status::RedisParseErr, "ACL GENPASS argument must be a valid integer"};
+        }
+        if (*bits_or <= 0 || *bits_or > 4096) {
+          return {Status::RedisParseErr, "ACL GENPASS argument must be between 1 and 4096"};
+        }
+        genpass_bits_ = *bits_or;
+      }
+    } else if (sub_command == "log") {
+      if (args.size() > 3) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kLog;
+      if (args.size() == 3) {
+        if (util::EqualICase(args[2], "reset")) {
+          log_reset_ = true;
+        } else {
+          auto count_or = ParseInt<int>(args[2], 10);
+          if (!count_or || *count_or < 0) {
+            return {Status::RedisParseErr, "ACL LOG count must be a non-negative integer"};
+          }
+          log_count_ = *count_or;
+        }
+      }
+    } else if (sub_command == "dryrun") {
+      if (args.size() < 4) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kDryRun;
+      username_ = args[2];
+      dryrun_command_tokens_.assign(args.begin() + 3, args.end());
+    } else if (sub_command == "help") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kHelp;
+    } else if (sub_command == "load") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kLoad;
+    } else if (sub_command == "save") {
+      if (args.size() != 2) {
+        return {Status::RedisParseErr, errWrongNumOfArguments};
+      }
+      subcommand_ = Subcommand::kSave;
+    } else {
+      return {Status::RedisParseErr,
+              "ACL subcommand must be one of SETUSER, GETUSER, USERS, WHOAMI, HELP, CAT, LIST, DELUSER, "
+              "GENPASS, LOG, DRYRUN, LOAD or SAVE"};
+    }
+
+    return Commander::Parse(args);
+  }
+
+  Status Execute([[maybe_unused]] engine::Context &ctx, Server *srv, Connection *conn, std::string *output) override {
+    if (!srv->GetConfig()->acl_preview_enabled) {
+      return {Status::RedisExecErr, "ACL preview feature is disabled"};
+    }
+
+    auto *acl = srv->GetAcl();
+    switch (subcommand_) {
+      case Subcommand::kSetUser:
+        return acl->HandleSetUser(srv->GetNamespace(), username_, modifiers_, output);
+      case Subcommand::kGetUser:
+        return acl->HandleGetUser(conn, username_, output);
+      case Subcommand::kWhoAmI:
+        return acl->HandleWhoAmI(conn, output);
+      case Subcommand::kUsers:
+        return acl->HandleUsers(conn, output);
+      case Subcommand::kList:
+        return acl->HandleList(conn, output);
+      case Subcommand::kCat:
+        return acl->HandleCat(conn, category_, output);
+      case Subcommand::kDelUser:
+        return acl->HandleDelUser(usernames_, output);
+      case Subcommand::kGenPass:
+        *output = redis::BulkString(GenerateRandomHex(static_cast<size_t>((genpass_bits_ + 3) / 4)));
+        return Status::OK();
+      case Subcommand::kLog:
+        if (log_reset_) {
+          *output = redis::RESP_OK;
+        } else {
+          std::vector<std::string> empty_entries;
+          empty_entries.reserve(static_cast<size_t>(std::max(log_count_, 0)));
+          *output = conn->MultiBulkString(empty_entries);
+        }
+        return Status::OK();
+      case Subcommand::kDryRun:
+        return acl->HandleDryRun(conn, username_, dryrun_command_tokens_, output);
+      case Subcommand::kHelp:
+        *output = conn->MultiBulkString(HelpEntries());
+        return Status::OK();
+      case Subcommand::kLoad:
+      case Subcommand::kSave:
+        return {Status::RedisExecErr,
+                "This Redis instance is not configured to use an ACL file. "
+                "Please set an ACL file before using ACL LOAD or ACL SAVE"};
+      case Subcommand::kUnknown:
+        break;
+    }
+    return {Status::RedisInvalidCmd, "Unknown ACL subcommand"};
+  }
+
+ private:
+  static std::string GenerateRandomHex(size_t length) {
+    static constexpr char kHexDigits[] = "0123456789abcdef";
+    std::string result;
+    result.resize(length);
+
+    std::random_device rd;
+    std::uniform_int_distribution<int> dist(0, 15);
+    for (auto &ch : result) {
+      ch = kHexDigits[dist(rd)];
+    }
+    return result;
+  }
+
+  static const std::vector<std::string> &HelpEntries() {
+    static const std::vector<std::string> kEntries = {
+        "CAT [<category>] -- List command categories or commands inside a category.",
+        "DELUSER <username> [<username> ...] -- Delete one or more ACL users.",
+        "DRYRUN <username> <command> [<arg> ...] -- Test whether a user can execute a command.",
+        "GENPASS [<bits>] -- Generate a random hexadecimal password.",
+        "GETUSER <username> -- Show the ACL rules for a user.",
+        "HELP -- Show this help.",
+        "LIST -- Show ACL rules for all users.",
+        "LOAD -- Reload ACL rules from configured ACL file.",
+        "LOG [<count> | RESET] -- Show ACL log entries or clear the ACL log.",
+        "SAVE -- Save ACL rules into configured ACL file.",
+        "SETUSER <username> [<rule> ...] -- Create or modify a user.",
+        "USERS -- List all ACL users.",
+        "WHOAMI -- Return the username associated with the current connection.",
+    };
+    return kEntries;
+  }
+
+  enum class Subcommand {
+    kUnknown,
+    kSetUser,
+    kGetUser,
+    kWhoAmI,
+    kUsers,
+    kList,
+    kCat,
+    kDelUser,
+    kGenPass,
+    kLog,
+    kDryRun,
+    kHelp,
+    kLoad,
+    kSave
+  };
+
+  Subcommand subcommand_ = Subcommand::kUnknown;
+  std::string username_;
+  std::vector<std::string> modifiers_;
+  std::optional<std::string> category_;
+  std::vector<std::string> usernames_;
+  std::vector<std::string> dryrun_command_tokens_;
+  bool log_reset_ = false;
+  int log_count_ = 10;
+  int genpass_bits_ = 256;
+};
+
 REDIS_REGISTER_COMMANDS(
-    Server, MakeCmdAttr<CommandAuth>("auth", 2, "read-only ok-loading auth", NO_KEY),
+    Server, MakeCmdAttr<CommandAuth>("auth", -2, "read-only ok-loading auth", NO_KEY),
     MakeCmdAttr<CommandPing>("ping", -1, "read-only", NO_KEY),
     MakeCmdAttr<CommandSelect>("select", 2, "read-only", NO_KEY),
     MakeCmdAttr<CommandInfo>("info", -1, "read-only ok-loading", NO_KEY),
@@ -1618,5 +1936,6 @@ REDIS_REGISTER_COMMANDS(
     MakeCmdAttr<CommandPollUpdates>("pollupdates", -2, "read-only admin", NO_KEY),
     MakeCmdAttr<CommandSST>("sst", -3, "write exclusive admin", 1, 1, 1),
     MakeCmdAttr<CommandFlushMemTable>("flushmemtable", -1, "exclusive write", NO_KEY),
-    MakeCmdAttr<CommandFlushBlockCache>("flushblockcache", 1, "exclusive write", NO_KEY), )
+    MakeCmdAttr<CommandFlushBlockCache>("flushblockcache", 1, "exclusive write", NO_KEY),
+    MakeCmdAttr<CommandAcl>("acl", -2, "write admin", NO_KEY), )
 }  // namespace redis

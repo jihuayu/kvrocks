@@ -23,6 +23,7 @@
 #include <event2/buffer.h>
 
 #include <deque>
+#include <limits>
 #include <memory>
 #include <set>
 #include <string>
@@ -37,6 +38,9 @@
 class Worker;
 
 namespace redis {
+
+class Acl;
+class AclUser;
 
 class Connection : public EvbufCallbackBase<Connection> {
  public:
@@ -175,6 +179,16 @@ class Connection : public EvbufCallbackBase<Connection> {
   void SetImporting() { importing_ = true; }
   bool IsImporting() const { return importing_; }
   bool CanMigrate() const;
+  static constexpr size_t kInvalidAclUserIndex = std::numeric_limits<size_t>::max();
+
+  void SetAclProfile(const std::string &username, size_t user_index, std::shared_ptr<const AclUser> user);
+  void ClearAclProfile();
+  bool HasAclProfile() const { return acl_enforced_; }
+  const std::string &GetAclUsername() const { return acl_username_; }
+  size_t GetAclUserIndex() const { return acl_user_index_; }
+
+  Status CheckAclCommandAllowed(Acl *acl, const CommandAttributes *attributes, const std::vector<std::string> &cmd_tokens,
+                                uint64_t cmd_flags);
 
   // Multi exec
   void SetInExec() { in_exec_ = true; }
@@ -217,6 +231,11 @@ class Connection : public EvbufCallbackBase<Connection> {
   std::vector<std::string> subscribe_channels_;
   std::vector<std::string> subscribe_patterns_;
   std::vector<std::string> subscribe_shard_channels_;
+
+  bool acl_enforced_ = false;
+  std::string acl_username_;
+  size_t acl_user_index_ = kInvalidAclUserIndex;
+  std::shared_ptr<const AclUser> acl_user_;
 
   Server *srv_;
   bool in_exec_ = false;

@@ -49,6 +49,7 @@
 #include "namespace.h"
 #include "search/index_manager.h"
 #include "search/indexer.h"
+#include "server/acl.h"
 #include "server/redis_connection.h"
 #include "stats/log_collector.h"
 #include "stats/stats.h"
@@ -343,8 +344,17 @@ class Server {
   void ResetWatchedKeys(redis::Connection *conn);
   std::list<std::pair<std::string, uint32_t>> GetSlaveHostAndPort();
   Namespace *GetNamespace() { return &namespace_; }
+  redis::Acl *GetAcl() { return &acl_; }
 
-  AuthResult AuthenticateUser(const std::string &user_password, std::string *ns);
+  // AuthenticateUser for ACL User
+  AuthResult AuthenticateUser(const std::string &username, const std::string &password, std::string *ns,
+                              std::shared_ptr<const redis::AclUser> *acl_user = nullptr,
+                              size_t *acl_user_index = nullptr);
+
+  // AuthenticateUser for common User
+  AuthResult AuthenticateUser(const std::string &user_password, std::string *ns,
+                              std::shared_ptr<const redis::AclUser> *acl_user = nullptr,
+                              size_t *acl_user_index = nullptr);
 
 #ifdef ENABLE_OPENSSL
   UniqueSSLContext ssl_ctx;
@@ -390,6 +400,9 @@ class Server {
 
   // namespace
   Namespace namespace_;
+
+  // acl
+  redis::Acl acl_;
 
   // Some jobs to operate DB should be unique
   std::mutex db_job_mu_;

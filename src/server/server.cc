@@ -53,6 +53,7 @@
 #include "storage/storage.h"
 #include "thread_util.h"
 #include "time_util.h"
+#include "vendor/sha256.h"
 #include "version.h"
 #include "worker.h"
 
@@ -63,7 +64,8 @@ Server::Server(engine::Storage *storage, Config *config)
       index_mgr(&indexer, storage),
       start_time_secs_(util::GetTimeStamp()),
       config_(config),
-      namespace_(storage) {
+      namespace_(storage),
+      acl_(storage) {
   // init commands stats here to prevent concurrent insert, and cause core
   auto commands = redis::CommandTable::GetOriginal();
 
@@ -158,6 +160,11 @@ Status Server::Start() {
   if (!s.IsOK()) {
     return s;
   }
+
+  if (config_->acl_preview_enabled) {
+    warn("[server] ACL preview feature is incomplete; do not use in production.");
+  }
+
   if (!config_->master_host.empty()) {
     s = AddMaster(config_->master_host, static_cast<uint32_t>(config_->master_port), false);
     if (!s.IsOK()) return s;
@@ -168,6 +175,11 @@ Status Server::Start() {
     if (!s.IsOK()) {
       return s.Prefixed("failed to shift replication id");
     }
+  }
+
+  s = acl_.LoadAcl();
+  if (!s.IsOK()) {
+    return s;
   }
 
   if (!config_->cluster_enabled) {
@@ -2200,7 +2212,88 @@ std::string Server::GetKeyNameFromCursor(const std::string &cursor, CursorType c
   return {};
 }
 
-AuthResult Server::AuthenticateUser(const std::string &user_password, std::string *ns) {
+AuthResult Server::AuthenticateUser(const std::string &username, const std::string &password, std::string *ns,
+                                    std::shared_ptr<const redis::AclUser> *acl_user, size_t *acl_user_index) {
+  if (username.empty()) {
+    return AuthenticateUser(password, ns, acl_user, acl_user_index);
+  }
+
+  if (config_->acl_preview_enabled) {
+    auto index = acl_.GetUserIndex(username);
+    if (index.has_value()) {
+      if (acl_user_index) {
+        *acl_user_index = index.value();
+      }
+
+      auto user = acl_.GetCachedUserByIndex(index.value());
+      if (acl_user) {
+        *acl_user = user;
+      }
+      if (!user || !user->enabled) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+
+      // nopass users authenticate with any supplied password when username is explicit.
+      if (user->nopass) {
+        *ns = user->ns.empty() ? kDefaultNamespace : user->ns;
+        return AuthResult::IS_USER;
+      }
+
+      if (user->passwords.empty()) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      if (password.empty()) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      auto digest = Sha256Hex(password);
+      if (user->passwords.find(digest) == user->passwords.end()) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      *ns = user->ns.empty() ? kDefaultNamespace : user->ns;
+      return AuthResult::IS_USER;
+    }
+  }
+
+  return AuthResult::INVALID_PASSWORD;
+}
+
+AuthResult Server::AuthenticateUser(const std::string &user_password, std::string *ns,
+                                    std::shared_ptr<const redis::AclUser> *acl_user, size_t *acl_user_index) {
+  if (acl_user) {
+    *acl_user = nullptr;
+  }
+  if (acl_user_index) {
+    *acl_user_index = redis::Connection::kInvalidAclUserIndex;
+  }
+
+  if (config_->acl_preview_enabled) {
+    auto index = acl_.GetUserIndex("default");
+    if (index.has_value()) {
+      auto user = acl_.GetCachedUserByIndex(index.value());
+      if (!user || !user->enabled) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      if (acl_user) {
+        *acl_user = user;
+      }
+      if (acl_user_index) {
+        *acl_user_index = index.value();
+      }
+      if (user->nopass) {
+        return AuthResult::NO_REQUIRE_PASS;
+      }
+      if (user->passwords.empty()) {
+        return AuthResult::INVALID_PASSWORD;
+      }
+      auto digest = Sha256Hex(user_password);
+      if (user->passwords.find(digest) != user->passwords.end()) {
+        *ns = user->ns.empty() ? kDefaultNamespace : user->ns;
+        return AuthResult::IS_USER;
+      }
+      return AuthResult::INVALID_PASSWORD;
+    }
+  }
+
   const auto &requirepass = GetConfig()->requirepass;
   if (requirepass.empty()) {
     return AuthResult::NO_REQUIRE_PASS;

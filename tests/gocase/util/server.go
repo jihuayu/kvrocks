@@ -181,6 +181,13 @@ func (s *KvrocksServer) Start() {
 		return err == nil || err.Error() == "NOAUTH Authentication required."
 	}, time.Minute, time.Second)
 
+	if s.configs["cluster-enabled"] == "yes" {
+		require.Eventually(s.t, func() bool {
+			err := c.Do(context.Background(), "clusterx", "version").Err()
+			return err == nil || err.Error() == "NOAUTH Authentication required."
+		}, time.Minute, time.Second)
+	}
+
 	s.cmd = cmd
 	s.clean = func(keepDir bool) {
 		require.NoError(s.t, stdout.Close())
@@ -277,6 +284,13 @@ func StartServerWithCLIOptions(
 		return err == nil || err.Error() == "NOAUTH Authentication required." || slices.Contains(status, process.Zombie)
 	}, time.Minute, time.Second)
 	require.NotContains(t, status, process.Zombie, "Kvrocks has been unexpectedly exited while starting server")
+
+	if configs["cluster-enabled"] == "yes" {
+		require.Eventually(t, func() bool {
+			err := c.Do(context.Background(), "clusterx", "version").Err()
+			return err == nil || err.Error() == "NOAUTH Authentication required."
+		}, time.Minute, time.Second)
+	}
 
 	return &KvrocksServer{
 		t:       t,
