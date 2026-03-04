@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include <fmt/format.h>
 #include "acl_actions.h"
 #include "commands/commander.h"
 #include "commands/error_constants.h"
@@ -64,7 +65,7 @@ Status RemoveAclUser(engine::Storage *storage, const std::string &username) {
 
 namespace {
 
-std::string DetermineNamespace(Namespace *ns_mgr, const std::string &username) {
+StatusOr<std::string> DetermineNamespace(Namespace *ns_mgr, const std::string &username, bool strict) {
   auto delimiter = username.find('#');
   if (delimiter == std::string::npos || delimiter + 1 >= username.size()) {
     return kDefaultNamespace;
@@ -74,10 +75,16 @@ std::string DetermineNamespace(Namespace *ns_mgr, const std::string &username) {
     return ns.empty() ? kDefaultNamespace : ns;
   }
   if (ns_mgr == nullptr) {
+    if (strict) {
+      return {Status::NotOK, fmt::format("Unknown namespace '{}' in username '{}'", ns, username)};
+    }
     return kDefaultNamespace;
   }
   auto token_or = ns_mgr->Get(ns);
   if (!token_or.IsOK()) {
+    if (strict) {
+      return {Status::NotOK, fmt::format("Unknown namespace '{}' in username '{}'", ns, username)};
+    }
     return kDefaultNamespace;
   }
   return ns;
@@ -312,7 +319,7 @@ std::optional<std::string> Acl::GetUsernameByIndex(size_t index) const {
 }
 
 Status Acl::HandleSetUser(Namespace *ns_mgr, const std::string &username, const std::vector<std::string> &modifiers,
-                          std::string *output) {
+                          std::string *output, bool strict_namespace) {
   if (username.empty()) {
     return {Status::RedisParseErr, errWrongNumOfArguments};
   }
@@ -335,7 +342,11 @@ Status Acl::HandleSetUser(Namespace *ns_mgr, const std::string &username, const 
     }
   }
 
-  const std::string user_namespace = DetermineNamespace(ns_mgr, username);
+  auto user_namespace_or = DetermineNamespace(ns_mgr, username, strict_namespace);
+  if (!user_namespace_or.IsOK()) {
+    return user_namespace_or.ToStatus();
+  }
+  const std::string user_namespace = std::move(user_namespace_or.GetValue());
   auto user_or = Get(username);
   AclUser user;
   if (user_or.Is<Status::NotFound>()) {

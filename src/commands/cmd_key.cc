@@ -491,6 +491,16 @@ class CommandSort : public Commander {
   }
 
   Status Execute(engine::Context &ctx, Server *srv, Connection *conn, std::string *output) override {
+    // Phase-1 ACL guardrail: dynamic BY/GET patterns access derived keys that cannot be
+    // statically validated, so require unrestricted key access when they are present.
+    bool has_dynamic_by = sort_argument_.sortby.find('*') != std::string::npos;
+    bool has_dynamic_get = std::any_of(sort_argument_.getpatterns.begin(), sort_argument_.getpatterns.end(),
+                                       [](const std::string &p) { return p.find('*') != std::string::npos; });
+    if ((has_dynamic_by || has_dynamic_get) && !conn->HasAclAllKeysAccess()) {
+      return {Status::RedisNoPerm,
+              "SORT with BY/GET patterns requires unrestricted key access (allkeys) in the ACL profile"};
+    }
+
     redis::Database redis(srv->storage, conn->GetNamespace());
 
     RedisType type = kRedisNone;

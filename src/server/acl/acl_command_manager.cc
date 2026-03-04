@@ -181,11 +181,15 @@ bool AclCommandManager::IsCommandAllowed(const std::vector<uint64_t> &bitmap, co
   if (!bit.has_value()) {
     return true;
   }
-  const size_t index = bit.value() / 64;
+  return IsCommandAllowedByBit(bitmap, bit.value());
+}
+
+bool AclCommandManager::IsCommandAllowedByBit(const std::vector<uint64_t> &bitmap, size_t bit) const {
+  const size_t index = bit / 64;
   if (bitmap.size() <= index) {
     return false;
   }
-  return (bitmap[index] & (UINT64_C(1) << (bit.value() % 64))) != 0;
+  return (bitmap[index] & (UINT64_C(1) << (bit % 64))) != 0;
 }
 
 void AclCommandManager::Seal() {

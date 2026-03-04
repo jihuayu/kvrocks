@@ -71,13 +71,14 @@ class CommandAuth : public Commander {
     size_t acl_user_index = Connection::kInvalidAclUserIndex;
     AuthResult result = has_username_ ? srv->AuthenticateUser(username_, password_, &ns, &acl_user, &acl_user_index)
                                       : srv->AuthenticateUser(password_, &ns, &acl_user, &acl_user_index);
-    conn->ClearAclProfile();
+    // Only modify connection state on success; failure preserves existing ACL enforcement context.
     switch (result) {
       case AuthResult::NO_REQUIRE_PASS:
         return {Status::RedisExecErr, "Client sent AUTH, but no password is set"};
       case AuthResult::INVALID_PASSWORD:
         return {Status::RedisExecErr, "Invalid password"};
       case AuthResult::IS_USER: {
+        conn->ClearAclProfile();
         conn->BecomeUser();
         if (acl_user && acl_user_index != Connection::kInvalidAclUserIndex) {
           std::string profile_name = has_username_ ? username_ : "default";
@@ -91,6 +92,7 @@ class CommandAuth : public Commander {
         break;
       }
       case AuthResult::IS_ADMIN:
+        conn->ClearAclProfile();
         conn->BecomeAdmin();
         break;
     }
@@ -931,13 +933,14 @@ class CommandHello final : public Commander {
             auth_username.empty()
                 ? srv->AuthenticateUser(auth_password, &ns, &acl_user, &acl_user_index)
                 : srv->AuthenticateUser(auth_username, auth_password, &ns, &acl_user, &acl_user_index);
-        conn->ClearAclProfile();
+        // Only modify connection state on success; failure preserves existing ACL enforcement context.
         switch (auth_result) {
           case AuthResult::NO_REQUIRE_PASS:
             return {Status::NotOK, "Client sent AUTH, but no password is set"};
           case AuthResult::INVALID_PASSWORD:
             return {Status::NotOK, "Invalid password"};
           case AuthResult::IS_USER: {
+            conn->ClearAclProfile();
             conn->BecomeUser();
             if (acl_user && acl_user_index != Connection::kInvalidAclUserIndex) {
               std::string profile_name = auth_username.empty() ? "default" : auth_username;
@@ -951,6 +954,7 @@ class CommandHello final : public Commander {
             break;
           }
           case AuthResult::IS_ADMIN:
+            conn->ClearAclProfile();
             conn->BecomeAdmin();
             break;
         }
@@ -1788,10 +1792,21 @@ class CommandAcl : public Commander {
       return {Status::RedisExecErr, "ACL preview feature is disabled"};
     }
 
+    // In cluster mode with acl-require-cluster-all-nodes enabled, reject local-only ACL mutations
+    // to prevent unintentional per-node policy drift. Operators must run the command on all nodes.
+    if (srv->GetConfig()->acl_require_cluster_all_nodes && srv->GetConfig()->cluster_enabled) {
+      if (subcommand_ == Subcommand::kSetUser || subcommand_ == Subcommand::kDelUser) {
+        return {Status::RedisExecErr,
+                "ACL mutations are rejected in cluster mode when acl-require-cluster-all-nodes is enabled. "
+                "Run the ACL command on every master node to maintain consistent policy."};
+      }
+    }
+
     auto *acl = srv->GetAcl();
     switch (subcommand_) {
       case Subcommand::kSetUser:
-        return acl->HandleSetUser(srv->GetNamespace(), username_, modifiers_, output);
+        return acl->HandleSetUser(srv->GetNamespace(), username_, modifiers_, output,
+                                  srv->GetConfig()->acl_namespace_strict);
       case Subcommand::kGetUser:
         return acl->HandleGetUser(conn, username_, output);
       case Subcommand::kWhoAmI:

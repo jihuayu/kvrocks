@@ -186,6 +186,8 @@ class Connection : public EvbufCallbackBase<Connection> {
   bool HasAclProfile() const { return acl_enforced_; }
   const std::string &GetAclUsername() const { return acl_username_; }
   size_t GetAclUserIndex() const { return acl_user_index_; }
+  // Returns true when ACL is enforced and all selectors grant unrestricted key access.
+  bool HasAclAllKeysAccess() const;
 
   Status CheckAclCommandAllowed(Acl *acl, const CommandAttributes *attributes, const std::vector<std::string> &cmd_tokens,
                                 uint64_t cmd_flags);

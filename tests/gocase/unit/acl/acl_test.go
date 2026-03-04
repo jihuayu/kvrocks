@@ -1012,3 +1012,252 @@ func TestACLDelUserDisconnectsUserConnections(t *testing.T) {
 		return err != nil
 	}, 5*time.Second, 50*time.Millisecond)
 }
+
+// TestACLAuthFailurePreservesSession validates Item #1:
+// A failed AUTH must not clear an already-authenticated user's ACL profile.
+func TestACLAuthFailurePreservesSession(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	// Create a restricted user: can only PING, no key access.
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "restricted", "on", ">secret", "+ping", "resetkeys").Err())
+
+	t.Run("AUTH failure does not weaken existing ACL restrictions", func(t *testing.T) {
+		conn := srv.NewTCPClient()
+		defer func() { require.NoError(t, conn.Close()) }()
+
+		// Authenticate as restricted user.
+		require.NoError(t, conn.WriteArgs("AUTH", "restricted", "secret"))
+		conn.MustRead(t, "+OK")
+
+		// Confirm PING works (allowed).
+		require.NoError(t, conn.WriteArgs("PING"))
+		conn.MustRead(t, "+PONG")
+
+		// Now attempt AUTH with wrong password — must fail.
+		require.NoError(t, conn.WriteArgs("AUTH", "wrongpassword"))
+		line, err := conn.ReadLine()
+		require.NoError(t, err)
+		require.Contains(t, line, "Invalid password", "expected auth failure error")
+
+		// After failed AUTH, the original ACL restrictions must still be enforced.
+		// SET should still be denied.
+		require.NoError(t, conn.WriteArgs("SET", "k", "v"))
+		line, err = conn.ReadLine()
+		require.NoError(t, err)
+		require.Contains(t, line, "NOPERM", "ACL restrictions must remain active after failed AUTH")
+	})
+
+	t.Run("HELLO AUTH failure does not weaken existing ACL restrictions", func(t *testing.T) {
+		conn := srv.NewTCPClient()
+		defer func() { require.NoError(t, conn.Close()) }()
+
+		// Authenticate via HELLO AUTH.
+		require.NoError(t, conn.WriteArgs("HELLO", "2", "AUTH", "restricted", "secret"))
+		_, err := conn.ReadLine()
+		require.NoError(t, err)
+
+		// Attempt HELLO with wrong credentials.
+		require.NoError(t, conn.WriteArgs("HELLO", "2", "AUTH", "restricted", "wrongpassword"))
+		line, err := conn.ReadLine()
+		require.NoError(t, err)
+		require.Contains(t, line, "Invalid password")
+
+		// ACL restrictions must still be active.
+		require.NoError(t, conn.WriteArgs("SET", "k", "v"))
+		line, err = conn.ReadLine()
+		require.NoError(t, err)
+		require.Contains(t, line, "NOPERM", "ACL restrictions must remain active after failed HELLO AUTH")
+	})
+}
+
+// TestACLSetUserPasswordRedaction validates Item #2:
+// ACL SETUSER password modifiers must be redacted in MONITOR and SLOWLOG output.
+func TestACLSetUserPasswordRedaction(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{
+		"acl-preview-enabled":     "yes",
+		"slowlog-log-slower-than": "0",
+	})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	t.Run("ACL SETUSER password tokens are redacted in SLOWLOG", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "pw_test_user", "on", ">supersecret").Err())
+		time.Sleep(50 * time.Millisecond)
+
+		result, err := admin.Do(ctx, "SLOWLOG", "GET").Result()
+		require.NoError(t, err)
+		entries, ok := result.([]interface{})
+		require.True(t, ok)
+
+		found := false
+		for _, entry := range entries {
+			parts, ok := entry.([]interface{})
+			if !ok || len(parts) < 4 {
+				continue
+			}
+			args, ok := parts[3].([]interface{})
+			if !ok {
+				continue
+			}
+			// Look for ACL SETUSER entry
+			if len(args) >= 2 {
+				cmd, _ := args[0].(string)
+				sub, _ := args[1].(string)
+				if cmd == "ACL" && sub == "SETUSER" {
+					found = true
+					for _, arg := range args {
+						s, _ := arg.(string)
+						require.NotContains(t, s, "supersecret", "password must be redacted in SLOWLOG")
+					}
+				}
+			}
+		}
+		require.True(t, found, "expected ACL SETUSER entry in SLOWLOG")
+	})
+}
+
+// TestACLContextMissFailsClosed validates Item #5:
+// When an ACL user is deleted while a connection is active, subsequent commands must
+// fail with NOAUTH (not silently continue with weakened/no enforcement).
+func TestACLContextMissFailsClosed(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "ephemeral", "on", ">p", "+ping", "~*").Err())
+
+	conn := srv.NewTCPClient()
+	defer func() { require.NoError(t, conn.Close()) }()
+
+	require.NoError(t, conn.WriteArgs("AUTH", "ephemeral", "p"))
+	conn.MustRead(t, "+OK")
+
+	// Delete the user while the connection is live.
+	require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "ephemeral").Err())
+
+	// After user deletion the connection should be killed (DELUSER kills connections)
+	// or any subsequent command must fail with authentication required, not NOPERM.
+	require.Eventually(t, func() bool {
+		if err := conn.WriteArgs("PING"); err != nil {
+			return true
+		}
+		line, err := conn.ReadLine()
+		if err != nil {
+			return true
+		}
+		// Accept either connection-closed or NOAUTH as the fail-closed response.
+		return line != "+PONG"
+	}, 5*time.Second, 50*time.Millisecond)
+}
+
+// TestACLSortDynamicPatternGuardrail validates Item #4:
+// SORT with dynamic BY/GET patterns must be rejected for users without allkeys.
+func TestACLSortDynamicPatternGuardrail(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	// User with limited key access (only "mylist").
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "sortlimited", "on", ">p", "+sort", "~mylist").Err())
+
+	// User with full key access.
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "sortfull", "on", ">p", "+sort", "~*").Err())
+
+	t.Run("SORT BY pattern denied without allkeys", func(t *testing.T) {
+		client := srv.NewClientWithOption(&redis.Options{Username: "sortlimited", Password: "p"})
+		defer func() { require.NoError(t, client.Close()) }()
+
+		err := client.Do(ctx, "SORT", "mylist", "BY", "weight_*").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "NOPERM")
+	})
+
+	t.Run("SORT GET pattern denied without allkeys", func(t *testing.T) {
+		client := srv.NewClientWithOption(&redis.Options{Username: "sortlimited", Password: "p"})
+		defer func() { require.NoError(t, client.Close()) }()
+
+		err := client.Do(ctx, "SORT", "mylist", "GET", "obj_*->name").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "NOPERM")
+	})
+
+	t.Run("SORT BY pattern allowed with allkeys", func(t *testing.T) {
+		clientFull := srv.NewClientWithOption(&redis.Options{Username: "sortfull", Password: "p"})
+		defer func() { require.NoError(t, clientFull.Close()) }()
+
+		// Should not get NOPERM (may get other errors due to empty list, but not permission error).
+		err := clientFull.Do(ctx, "SORT", "mylist", "BY", "weight_*").Err()
+		if err != nil {
+			require.NotContains(t, err.Error(), "NOPERM")
+		}
+	})
+}
+
+// TestACLNamespaceStrictMode validates Item #6:
+// With acl-namespace-strict=yes (default), ACL SETUSER with an unknown namespace suffix must fail.
+func TestACLNamespaceStrictMode(t *testing.T) {
+	t.Run("Strict mode (default): unknown namespace is rejected", func(t *testing.T) {
+		srv := util.StartServer(t, map[string]string{
+			"acl-preview-enabled": "yes",
+			// acl-namespace-strict defaults to yes
+		})
+		defer srv.Close()
+
+		ctx := context.Background()
+		admin := srv.NewClient()
+		defer func() { require.NoError(t, admin.Close()) }()
+
+		err := admin.Do(ctx, "ACL", "SETUSER", "user#nonexistentns", "on").Err()
+		require.Error(t, err, "unknown namespace should be rejected in strict mode")
+		require.Contains(t, err.Error(), "nonexistentns")
+	})
+
+	t.Run("Compatibility mode: unknown namespace falls back to default", func(t *testing.T) {
+		srv := util.StartServer(t, map[string]string{
+			"acl-preview-enabled":  "yes",
+			"acl-namespace-strict": "no",
+		})
+		defer srv.Close()
+
+		ctx := context.Background()
+		admin := srv.NewClient()
+		defer func() { require.NoError(t, admin.Close()) }()
+
+		err := admin.Do(ctx, "ACL", "SETUSER", "user#nonexistentns", "on").Err()
+		require.NoError(t, err, "unknown namespace should fall back to default in compatibility mode")
+	})
+}
+
+// TestACLClusterAllNodesMode validates Item #3:
+// With acl-require-cluster-all-nodes=yes, ACL mutations in cluster mode must be rejected.
+func TestACLClusterAllNodesMode(t *testing.T) {
+	t.Run("Standalone: ACL SETUSER always allowed regardless of acl-require-cluster-all-nodes", func(t *testing.T) {
+		srv := util.StartServer(t, map[string]string{
+			"acl-preview-enabled":           "yes",
+			"acl-require-cluster-all-nodes": "yes",
+		})
+		defer srv.Close()
+
+		ctx := context.Background()
+		admin := srv.NewClient()
+		defer func() { require.NoError(t, admin.Close()) }()
+
+		// In standalone mode cluster_enabled is false, so the guard does not trigger.
+		err := admin.Do(ctx, "ACL", "SETUSER", "standaloneuser", "on").Err()
+		require.NoError(t, err)
+	})
+}

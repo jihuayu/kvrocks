@@ -241,15 +241,15 @@ void Connection::ClearAclProfile() {
   acl_user_.reset();
 }
 
-namespace {
-
-bool SelectorAllowsCommand(const redis::AclSelector &selector, const std::string &command) {
-  if ((selector.flags & redis::kAclSelectorAllCommands) != 0) {
-    return true;
+bool Connection::HasAclAllKeysAccess() const {
+  if (!acl_enforced_ || !acl_user_) return true;
+  for (const auto &selector : acl_user_->allowed_commands) {
+    if ((selector.flags & redis::kAclSelectorAllKeys) != 0) return true;
   }
-  auto &manager = redis::AclCommandManager::Instance();
-  return manager.IsCommandAllowed(selector.allowed_commands, command);
+  return false;
 }
+
+namespace {
 
 uint32_t CommandRequiredKeyPerm(uint64_t cmd_flags) {
   return (cmd_flags & redis::kCmdWrite) ? redis::kAclKeyWrite : redis::kAclKeyRead;
@@ -345,8 +345,12 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
 
   auto cached_user = acl->GetCachedUserByIndex(acl_user_index_);
   if (!cached_user) {
+    // Fail closed: deauthenticate the connection and require re-authentication.
+    // This prevents a weakened long-lived session when the ACL user has been deleted/reloaded.
     ClearAclProfile();
-    return {Status::RedisNoPerm, "ACL user context is not available"};
+    ns_.clear();
+    is_admin_ = false;
+    return {Status::RedisNoAuth, "Authentication required"};
   }
 
   acl_user_ = std::move(cached_user);
@@ -356,9 +360,15 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
   }
 
   const auto command = util::ToLower(attributes->name);
+  // Use cached bit index to avoid map lookup and lock on the hot path.
+  auto cached_bit = attributes->GetOrResolveAclBit();
   for (const auto &selector : acl_user_->allowed_commands) {
-    if (!SelectorAllowsCommand(selector, command)) {
-      continue;
+    if ((selector.flags & redis::kAclSelectorAllCommands) == 0) {
+      auto &mgr = redis::AclCommandManager::Instance();
+      bool allowed = cached_bit.has_value()
+                         ? mgr.IsCommandAllowedByBit(selector.allowed_commands, cached_bit.value())
+                         : mgr.IsCommandAllowed(selector.allowed_commands, command);
+      if (!allowed) continue;
     }
     if (!SelectorAllowsKeys(selector, attributes, cmd_tokens, cmd_flags)) {
       continue;
