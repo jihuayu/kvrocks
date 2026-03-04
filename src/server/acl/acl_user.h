@@ -28,6 +28,7 @@
 #include <set>
 #include <shared_mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "common/status.h"
@@ -90,10 +91,16 @@ AclSelector &EnsureRootSelector(AclUser &user);
 
 class AclUserManager {
  public:
+  struct IndexedUser {
+    size_t index = 0;
+    std::shared_ptr<const AclUser> user;
+  };
+
   AclUserManager();
 
   std::shared_ptr<const AclUser> GetUserByIndex(size_t index);
   std::shared_ptr<const AclUser> GetUserByUserName(const std::string &username);
+  std::optional<IndexedUser> GetIndexedUserByUsername(const std::string &username);
   std::optional<size_t> GetUserIndex(const std::string &username) const;
   void SetUser(const std::string &username, std::shared_ptr<const AclUser> user);
   bool AddUser(const std::string &username, std::shared_ptr<const AclUser> user);
@@ -101,20 +108,24 @@ class AclUserManager {
   void Reset();
   std::vector<std::string> ListUsernames() const;
   std::optional<std::string> GetUsernameByIndex(size_t index) const;
+  bool IsUsernameMatchedByIndex(size_t index, const std::string &username) const;
 
  private:
   using UserSlots = std::vector<std::shared_ptr<const AclUser>>;
+  using SlotUsernames = std::vector<std::string>;
   static constexpr size_t kInitialSlotCount = 256;
 
   mutable std::shared_mutex mu_;
   // username to slot index mapping
-  std::map<std::string, size_t> username_index_;
+  std::unordered_map<std::string, size_t> username_index_;
   // slot index to username mapping, empty string means free slot
   std::vector<std::string> index_usernames_;
   // reusable free slot stack
   std::vector<size_t> free_slots_;
   // lock-free snapshot of user slots (read path uses atomic load only)
   std::shared_ptr<const UserSlots> user_slots_;
+  // lock-free snapshot of slot index to username mapping
+  std::shared_ptr<const SlotUsernames> slot_usernames_;
 };
 
 }  // namespace redis

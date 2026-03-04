@@ -51,12 +51,18 @@ if [[ $QUICK -eq 1 ]]; then
   REPEAT=3
   LARGE_USERS_COUNT=100   # S13/S14 quick mode
   XLARGE_USERS_COUNT=300
+  AUTH_SWITCH_ROUNDS=6000
+  AUTH_SWITCH_WORKERS=6
+  ACL_SETTLE_SECONDS=2
 else
   BENCH_N=500000
   BENCH_CLIENTS=128
   REPEAT=5
   LARGE_USERS_COUNT=2000
   XLARGE_USERS_COUNT=5000
+  AUTH_SWITCH_ROUNDS=30000
+  AUTH_SWITCH_WORKERS=12
+  ACL_SETTLE_SECONDS=5
 fi
 
 BENCH_DATA_SIZE=64
@@ -178,6 +184,64 @@ collect_info() {
   mkdir -p "$outdir"
   timeout 5 redis-cli -p "$port" info all > "${outdir}/info_${label}.txt" 2>/dev/null || true
   timeout 5 redis-cli -p "$port" info commandstats > "${outdir}/commandstats_${label}.txt" 2>/dev/null || true
+}
+
+wait_for_acl_settle() {
+  local seconds=${1:-$ACL_SETTLE_SECONDS}
+  if [[ "$seconds" -gt 0 ]]; then
+    log "  Waiting ${seconds}s for post-mutation steady state ..."
+    sleep "$seconds"
+  fi
+}
+
+bench_auth_switch() {
+  # bench_auth_switch <scenario_id> <label> <port> <user_count> <rounds> <workers>
+  # Workload per round:
+  #   AUTH bench:u<id> p<id>
+  #   GET  u<id>:k<seq>
+  local sid=$1 label=$2 port=$3 user_count=$4 rounds=$5 workers=$6
+  local outdir="${RAW_DIR}/${sid}"
+  mkdir -p "$outdir"
+  local txt="${outdir}/${label}.txt"
+  local worker_logs="${outdir}/${label}_worker.log"
+  : > "$worker_logs"
+
+  local rounds_per_worker=$(( (rounds + workers - 1) / workers ))
+  local effective_rounds=$(( rounds_per_worker * workers ))
+  local total_commands=$(( effective_rounds * 2 ))
+  local start_ts end_ts elapsed_sec commands_per_sec
+  start_ts=$(date +%s.%N)
+
+  log "  Benchmarking ${sid}/${label} on port ${port} (AUTH+GET random user switch) ..."
+  for _ in $(seq 1 "$workers"); do
+    (
+      {
+        for i in $(seq 1 "$rounds_per_worker"); do
+          uid=$(( (RANDOM % user_count) + 1 ))
+          printf 'AUTH bench:u%s p%s\n' "$uid" "$uid"
+          printf 'GET u%s:k%s\n' "$uid" "$i"
+        done
+      } | timeout 120 redis-cli -p "$port" --no-auth-warning >/dev/null 2>>"$worker_logs" || true
+    ) &
+  done
+  wait
+
+  end_ts=$(date +%s.%N)
+  elapsed_sec=$(awk -v start="$start_ts" -v end="$end_ts" 'BEGIN{printf "%.6f", end-start}')
+  commands_per_sec="N/A"
+  if awk -v t="$elapsed_sec" 'BEGIN{exit (t > 0) ? 0 : 1}'; then
+    commands_per_sec=$(awk -v cmds="$total_commands" -v t="$elapsed_sec" 'BEGIN{printf "%.2f", cmds/t}')
+  fi
+
+  {
+    echo "workload=AUTH+GET random-user switch on persistent connections"
+    echo "users=${user_count}"
+    echo "rounds=${effective_rounds}"
+    echo "commands=${total_commands}"
+    echo "workers=${workers}"
+    echo "elapsed_sec=${elapsed_sec}"
+    echo "commands_per_sec=${commands_per_sec}"
+  } > "$txt"
 }
 
 parse_csv_ops() {
@@ -356,9 +420,16 @@ run_s13_s16_large_users() {
   log "  Created ${LARGE_USERS_COUNT} users in ${t_create}s"
 
   collect_info S13 "after_${LARGE_USERS_COUNT}_users" "$port"
+  wait_for_acl_settle "$ACL_SETTLE_SECONDS"
 
-  # Bench GET/SET under LARGE_USERS_COUNT user scale (use bench user which already exists)
-  bench_cmd S13 "getset_with_${LARGE_USERS_COUNT}_users" "$port" "--user bench -a benchpass" -t get,set
+  # Fixed-user steady-state throughput (does not stress username index lookup on AUTH path).
+  bench_cmd S13 "steady_getset_with_${LARGE_USERS_COUNT}_users" "$port" "--user bench -a benchpass" -t get,set
+  # ACL-off control with the same client concurrency.
+  bench_cmd S13 "steady_getset_m0_control_with_${LARGE_USERS_COUNT}_users" "$PORT_M0" "" -t get,set
+
+  # Random-user AUTH switch throughput to isolate username lookup/authentication overhead.
+  bench_auth_switch S13 "authswitch_with_${LARGE_USERS_COUNT}_users" "$port" \
+    "$LARGE_USERS_COUNT" "$AUTH_SWITCH_ROUNDS" "$AUTH_SWITCH_WORKERS"
   collect_info S13 "m2_bench" "$port"
 
   # S15: Management commands under large scale
@@ -393,7 +464,11 @@ run_s13_s16_large_users() {
   log "  Total ${XLARGE_USERS_COUNT} users created"
 
   collect_info S14 "after_${XLARGE_USERS_COUNT}_users" "$port"
-  bench_cmd S14 "getset_with_${XLARGE_USERS_COUNT}_users" "$port" "--user bench -a benchpass" -t get,set
+  wait_for_acl_settle "$ACL_SETTLE_SECONDS"
+  bench_cmd S14 "steady_getset_with_${XLARGE_USERS_COUNT}_users" "$port" "--user bench -a benchpass" -t get,set
+  bench_cmd S14 "steady_getset_m0_control_with_${XLARGE_USERS_COUNT}_users" "$PORT_M0" "" -t get,set
+  bench_auth_switch S14 "authswitch_with_${XLARGE_USERS_COUNT}_users" "$port" \
+    "$XLARGE_USERS_COUNT" "$AUTH_SWITCH_ROUNDS" "$AUTH_SWITCH_WORKERS"
 
   # S15 extra: re-run management commands under XLARGE_USERS_COUNT
   {
@@ -828,8 +903,8 @@ cat >> "$report" << 'SECTION'
 3. **Where does the delta come from?**
    - Deny path (S05/S06): NOPERM throughput is comparable to normal ops, confirming O(1) early-exit.
    - ACL complexity (S01_complexity): adding 2–4 key patterns adds <5% overhead on GET path.
-   - Large user pool (S13/S14): 300 users vs 100 users shows ~22% GET drop — user lookup cost
-     grows with user count. This exceeds the 15% threshold and warrants investigation.
+   - Large user pool (S13/S14): the fixed-user benchmark showed a significant GET drop.
+   - This signal alone cannot be attributed to username lookup; verify with AUTH-switch workload first.
 
 ---
 
@@ -973,9 +1048,16 @@ run_s13_s16_large_users() {
   log "  Created ${LARGE_USERS_COUNT} users in ${t_create}s"
 
   collect_info S13 "after_${LARGE_USERS_COUNT}_users" "$port"
+  wait_for_acl_settle "$ACL_SETTLE_SECONDS"
 
-  # Bench GET/SET under LARGE_USERS_COUNT user scale (use bench user which already exists)
-  bench_cmd S13 "getset_with_${LARGE_USERS_COUNT}_users" "$port" "--user bench -a benchpass" -t get,set
+  # Fixed-user steady-state throughput (does not stress username index lookup on AUTH path).
+  bench_cmd S13 "steady_getset_with_${LARGE_USERS_COUNT}_users" "$port" "--user bench -a benchpass" -t get,set
+  # ACL-off control with the same client concurrency.
+  bench_cmd S13 "steady_getset_m0_control_with_${LARGE_USERS_COUNT}_users" "$PORT_M0" "" -t get,set
+
+  # Random-user AUTH switch throughput to isolate username lookup/authentication overhead.
+  bench_auth_switch S13 "authswitch_with_${LARGE_USERS_COUNT}_users" "$port" \
+    "$LARGE_USERS_COUNT" "$AUTH_SWITCH_ROUNDS" "$AUTH_SWITCH_WORKERS"
   collect_info S13 "m2_bench" "$port"
 
   # S15: Management commands under large scale
@@ -1010,7 +1092,11 @@ run_s13_s16_large_users() {
   log "  Total ${XLARGE_USERS_COUNT} users created"
 
   collect_info S14 "after_${XLARGE_USERS_COUNT}_users" "$port"
-  bench_cmd S14 "getset_with_${XLARGE_USERS_COUNT}_users" "$port" "--user bench -a benchpass" -t get,set
+  wait_for_acl_settle "$ACL_SETTLE_SECONDS"
+  bench_cmd S14 "steady_getset_with_${XLARGE_USERS_COUNT}_users" "$port" "--user bench -a benchpass" -t get,set
+  bench_cmd S14 "steady_getset_m0_control_with_${XLARGE_USERS_COUNT}_users" "$PORT_M0" "" -t get,set
+  bench_auth_switch S14 "authswitch_with_${XLARGE_USERS_COUNT}_users" "$port" \
+    "$XLARGE_USERS_COUNT" "$AUTH_SWITCH_ROUNDS" "$AUTH_SWITCH_WORKERS"
 
   # S15 extra: re-run management commands under XLARGE_USERS_COUNT
   {
@@ -1097,6 +1183,25 @@ generate_report() {
         END { if (p99!="N/A") print p99 }
       ' "$txt"
     fi
+  }
+
+  get_metric_from_kv() {
+    local txt=$1 metric=$2
+    [[ -f "$txt" ]] || { echo "N/A"; return; }
+    awk -F'=' -v metric="$metric" '
+      $1 == metric { print $2; found=1; exit }
+      END { if (!found) print "N/A" }
+    ' "$txt"
+  }
+
+  ratio_percent() {
+    local numerator=$1 denominator=$2
+    if [[ "$numerator" == "N/A" || "$denominator" == "N/A" || \
+          ! "$numerator" =~ ^[0-9]+(\.[0-9]+)?$ || ! "$denominator" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+      echo "N/A"
+      return
+    fi
+    awk -v n="$numerator" -v d="$denominator" 'BEGIN{if(d<=0) print "N/A"; else printf "%.1f%%", n/d*100}'
   }
 
   cat > "$report" <<'HEADER'
@@ -1241,13 +1346,62 @@ SECTION
     echo '```' >> "$report"
     echo "" >> "$report"
   fi
-  echo "### GET/SET Throughput with Large User Pool" >> "$report"
-  local ops_large ops_xl
-  ops_large=$(get_ops "${RAW_DIR}/S13/getset_with_${LARGE_USERS_COUNT}_users.txt" "GET")
-  ops_xl=$(get_ops "${RAW_DIR}/S14/getset_with_${XLARGE_USERS_COUNT}_users.txt" "GET")
-  echo "- GET ops/s with ${LARGE_USERS_COUNT} users: ${ops_large:-N/A}" >> "$report"
-  echo "- GET ops/s with ${XLARGE_USERS_COUNT} users: ${ops_xl:-N/A}" >> "$report"
-  echo "" >> "$report"
+  echo "### Workload A – Fixed-user steady-state GET/SET (bench user)" >> "$report"
+  local s13_steady_get s14_steady_get s13_steady_set s14_steady_set s13_steady_p99 s14_steady_p99
+  local s13_ctrl_get s14_ctrl_get s13_ctrl_set s14_ctrl_set
+  s13_steady_get=$(get_ops "${RAW_DIR}/S13/steady_getset_with_${LARGE_USERS_COUNT}_users.txt" "GET")
+  s14_steady_get=$(get_ops "${RAW_DIR}/S14/steady_getset_with_${XLARGE_USERS_COUNT}_users.txt" "GET")
+  s13_steady_set=$(get_ops "${RAW_DIR}/S13/steady_getset_with_${LARGE_USERS_COUNT}_users.txt" "SET")
+  s14_steady_set=$(get_ops "${RAW_DIR}/S14/steady_getset_with_${XLARGE_USERS_COUNT}_users.txt" "SET")
+  s13_steady_p99=$(get_p99 "${RAW_DIR}/S13/steady_getset_with_${LARGE_USERS_COUNT}_users.txt" "GET")
+  s14_steady_p99=$(get_p99 "${RAW_DIR}/S14/steady_getset_with_${XLARGE_USERS_COUNT}_users.txt" "GET")
+  s13_ctrl_get=$(get_ops "${RAW_DIR}/S13/steady_getset_m0_control_with_${LARGE_USERS_COUNT}_users.txt" "GET")
+  s14_ctrl_get=$(get_ops "${RAW_DIR}/S14/steady_getset_m0_control_with_${XLARGE_USERS_COUNT}_users.txt" "GET")
+  s13_ctrl_set=$(get_ops "${RAW_DIR}/S13/steady_getset_m0_control_with_${LARGE_USERS_COUNT}_users.txt" "SET")
+  s14_ctrl_set=$(get_ops "${RAW_DIR}/S14/steady_getset_m0_control_with_${XLARGE_USERS_COUNT}_users.txt" "SET")
+  cat >> "$report" <<EOF
+| Metric | ${LARGE_USERS_COUNT} users | ${XLARGE_USERS_COUNT} users | Delta |
+|--------|-------------------|--------------------|-------|
+| GET ops/s | ${s13_steady_get} | ${s14_steady_get} | $(compute_delta "${s13_steady_get:-}" "${s14_steady_get:-}") |
+| SET ops/s | ${s13_steady_set} | ${s14_steady_set} | $(compute_delta "${s13_steady_set:-}" "${s14_steady_set:-}") |
+| GET P99 (ms) | ${s13_steady_p99} | ${s14_steady_p99} | $(compute_delta "${s13_steady_p99:-}" "${s14_steady_p99:-}") |
+
+EOF
+
+  cat >> "$report" <<EOF
+### Workload A Control – ACL off (M0), same concurrency
+| Metric | S13 control | S14 control | Delta |
+|--------|-------------|-------------|-------|
+| GET ops/s | ${s13_ctrl_get} | ${s14_ctrl_get} | $(compute_delta "${s13_ctrl_get:-}" "${s14_ctrl_get:-}") |
+| SET ops/s | ${s13_ctrl_set} | ${s14_ctrl_set} | $(compute_delta "${s13_ctrl_set:-}" "${s14_ctrl_set:-}") |
+
+- Normalized GET (M2/M0): S13=$(ratio_percent "${s13_steady_get:-}" "${s13_ctrl_get:-}"), S14=$(ratio_percent "${s14_steady_get:-}" "${s14_ctrl_get:-}")
+- Normalized SET (M2/M0): S13=$(ratio_percent "${s13_steady_set:-}" "${s13_ctrl_set:-}"), S14=$(ratio_percent "${s14_steady_set:-}" "${s14_ctrl_set:-}")
+
+EOF
+
+  echo "### Workload B – Random-user AUTH switch + GET (lookup-sensitive)" >> "$report"
+  local s13_auth_cps s14_auth_cps s13_auth_rounds s14_auth_rounds
+  s13_auth_cps=$(get_metric_from_kv "${RAW_DIR}/S13/authswitch_with_${LARGE_USERS_COUNT}_users.txt" "commands_per_sec")
+  s14_auth_cps=$(get_metric_from_kv "${RAW_DIR}/S14/authswitch_with_${XLARGE_USERS_COUNT}_users.txt" "commands_per_sec")
+  s13_auth_rounds=$(get_metric_from_kv "${RAW_DIR}/S13/authswitch_with_${LARGE_USERS_COUNT}_users.txt" "rounds")
+  s14_auth_rounds=$(get_metric_from_kv "${RAW_DIR}/S14/authswitch_with_${XLARGE_USERS_COUNT}_users.txt" "rounds")
+  cat >> "$report" <<EOF
+| Metric | ${LARGE_USERS_COUNT} users | ${XLARGE_USERS_COUNT} users | Delta |
+|--------|-------------------|--------------------|-------|
+| AUTH+GET commands/s | ${s13_auth_cps} | ${s14_auth_cps} | $(compute_delta "${s13_auth_cps:-}" "${s14_auth_cps:-}") |
+| AUTH+GET rounds | ${s13_auth_rounds} | ${s14_auth_rounds} | $(compute_delta "${s13_auth_rounds:-}" "${s14_auth_rounds:-}") |
+
+EOF
+
+  cat >> "$report" <<'EOF'
+- Attribution rule:
+  - Workload A primarily measures steady command path under larger ACL metadata.
+  - Workload A control (ACL off, same concurrency) helps filter out global runtime drift.
+  - Workload B stresses `AUTH` username lookup and credential validation directly.
+  - Do not attribute Workload A regressions to user index lookup unless Workload B shows the same trend.
+
+EOF
 
   cat >> "$report" <<'SECTION'
 ## S15 – ACL Management Commands Latency under Large User Scale

@@ -303,6 +303,13 @@ std::optional<size_t> Acl::GetUserIndex(const std::string &username) {
   return user_manager_->GetUserIndex(username);
 }
 
+std::optional<AclUserManager::IndexedUser> Acl::GetIndexedUserByUsername(const std::string &username) {
+  if (!user_manager_) {
+    return std::nullopt;
+  }
+  return user_manager_->GetIndexedUserByUsername(username);
+}
+
 std::shared_ptr<const AclUser> Acl::GetCachedUserByIndex(size_t index) {
   if (!user_manager_) {
     return nullptr;
@@ -329,6 +336,13 @@ std::optional<std::string> Acl::GetUsernameByIndex(size_t index) const {
     return std::nullopt;
   }
   return user_manager_->GetUsernameByIndex(index);
+}
+
+bool Acl::IsUsernameMatchedByIndex(size_t index, const std::string &username) const {
+  if (!user_manager_) {
+    return false;
+  }
+  return user_manager_->IsUsernameMatchedByIndex(index, username);
 }
 
 Status Acl::HandleSetUser(Namespace *ns_mgr, const std::string &username, const std::vector<std::string> &modifiers,

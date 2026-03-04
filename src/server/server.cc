@@ -2251,13 +2251,13 @@ AuthResult Server::AuthenticateUser(const std::string &username, const std::stri
   }
 
   if (config_->acl_preview_enabled) {
-    auto index = acl_.GetUserIndex(username);
-    if (index.has_value()) {
+    auto indexed_user = acl_.GetIndexedUserByUsername(username);
+    if (indexed_user.has_value()) {
       if (acl_user_index) {
-        *acl_user_index = index.value();
+        *acl_user_index = indexed_user->index;
       }
 
-      auto user = acl_.GetCachedUserByIndex(index.value());
+      auto user = std::move(indexed_user->user);
       if (acl_user) {
         *acl_user = user;
       }
@@ -2299,9 +2299,9 @@ AuthResult Server::AuthenticateUser(const std::string &user_password, std::strin
   }
 
   if (config_->acl_preview_enabled) {
-    auto index = acl_.GetUserIndex("default");
-    if (index.has_value()) {
-      auto user = acl_.GetCachedUserByIndex(index.value());
+    auto indexed_user = acl_.GetIndexedUserByUsername("default");
+    if (indexed_user.has_value()) {
+      auto user = std::move(indexed_user->user);
       if (!user || !user->enabled) {
         return AuthResult::INVALID_PASSWORD;
       }
@@ -2309,7 +2309,7 @@ AuthResult Server::AuthenticateUser(const std::string &user_password, std::strin
         *acl_user = user;
       }
       if (acl_user_index) {
-        *acl_user_index = index.value();
+        *acl_user_index = indexed_user->index;
       }
       if (user->nopass) {
         return AuthResult::NO_REQUIRE_PASS;

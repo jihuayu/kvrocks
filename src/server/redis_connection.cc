@@ -361,8 +361,7 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
   }
 
   // Verify username at slot matches the stored identity to guard against slot reuse races.
-  auto slot_username = acl->GetUsernameByIndex(acl_user_index_);
-  if (!slot_username.has_value() || slot_username.value() != acl_username_) {
+  if (!acl->IsUsernameMatchedByIndex(acl_user_index_, acl_username_)) {
     ClearAclProfile();
     ns_.clear();
     is_admin_ = false;
@@ -651,13 +650,12 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
       bool require_auth = !password.empty();
       if (config->acl_preview_enabled) {
         require_auth = false;
-        auto default_user_index = srv_->GetAcl()->GetUserIndex("default");
-        if (default_user_index.has_value()) {
-          auto default_user = srv_->GetAcl()->GetCachedUserByIndex(default_user_index.value());
-          if (default_user && default_user->enabled && default_user->nopass) {
+        auto default_user = srv_->GetAcl()->GetIndexedUserByUsername("default");
+        if (default_user.has_value()) {
+          if (default_user->user && default_user->user->enabled && default_user->user->nopass) {
             BecomeUser();
-            SetNamespace(default_user->ns.empty() ? kDefaultNamespace : default_user->ns);
-            SetAclProfile("default", default_user_index.value(), std::move(default_user));
+            SetNamespace(default_user->user->ns.empty() ? kDefaultNamespace : default_user->user->ns);
+            SetAclProfile("default", default_user->index, std::move(default_user->user));
           } else {
             require_auth = true;
           }

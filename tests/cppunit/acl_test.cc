@@ -292,6 +292,40 @@ TEST_F(AclTest, UserIndexMapping) {
   EXPECT_EQ("default", cached_user->ns);
 }
 
+TEST_F(AclTest, IndexedUserLookupByUsername) {
+  auto acl = createAcl();
+  ASSERT_TRUE(acl->Set("indexed_user", BuildUser(true, "default")).IsOK());
+
+  auto indexed_user = acl->GetIndexedUserByUsername("indexed_user");
+  ASSERT_TRUE(indexed_user.has_value());
+  ASSERT_NE(nullptr, indexed_user->user);
+  EXPECT_TRUE(indexed_user->user->enabled);
+  EXPECT_EQ("default", indexed_user->user->ns);
+
+  auto index_opt = acl->GetUserIndex("indexed_user");
+  ASSERT_TRUE(index_opt.has_value());
+  EXPECT_EQ(index_opt.value(), indexed_user->index);
+}
+
+TEST_F(AclTest, UsernameMatchByIndexWithSlotReuse) {
+  auto acl = createAcl();
+  ASSERT_TRUE(acl->Set("slot_user_a", BuildUser(true, "default")).IsOK());
+
+  auto first_index = acl->GetUserIndex("slot_user_a");
+  ASSERT_TRUE(first_index.has_value());
+  EXPECT_TRUE(acl->IsUsernameMatchedByIndex(first_index.value(), "slot_user_a"));
+
+  ASSERT_TRUE(acl->Del("slot_user_a").IsOK());
+  EXPECT_FALSE(acl->IsUsernameMatchedByIndex(first_index.value(), "slot_user_a"));
+
+  ASSERT_TRUE(acl->Set("slot_user_b", BuildUser(true, "default")).IsOK());
+  auto second_index = acl->GetUserIndex("slot_user_b");
+  ASSERT_TRUE(second_index.has_value());
+  EXPECT_EQ(first_index.value(), second_index.value());
+  EXPECT_FALSE(acl->IsUsernameMatchedByIndex(second_index.value(), "slot_user_a"));
+  EXPECT_TRUE(acl->IsUsernameMatchedByIndex(second_index.value(), "slot_user_b"));
+}
+
 // ============================================================================
 // Serialization Tests
 // ============================================================================

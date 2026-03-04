@@ -20,6 +20,8 @@
 
 #include "acl_user.h"
 
+#include <algorithm>
+
 #include "acl_command_manager.h"
 
 namespace redis {
@@ -281,6 +283,7 @@ AclSelector &EnsureRootSelector(AclUser &user) {
 
 AclUserManager::AclUserManager() {
   user_slots_ = std::make_shared<const UserSlots>(kInitialSlotCount);
+  slot_usernames_ = std::make_shared<const SlotUsernames>(kInitialSlotCount);
   index_usernames_.assign(kInitialSlotCount, "");
   free_slots_.reserve(kInitialSlotCount);
   for (size_t i = 0; i < kInitialSlotCount; ++i) {
@@ -309,6 +312,24 @@ std::shared_ptr<const AclUser> AclUserManager::GetUserByUserName(const std::stri
     return nullptr;
   }
   return (*slots)[slot];
+}
+
+std::optional<AclUserManager::IndexedUser> AclUserManager::GetIndexedUserByUsername(const std::string &username) {
+  std::shared_lock<std::shared_mutex> lock(mu_);
+  auto iter = username_index_.find(username);
+  if (iter == username_index_.end()) {
+    return std::nullopt;
+  }
+  const size_t slot = iter->second;
+  auto slots = std::atomic_load(&user_slots_);
+  if (!slots || slot >= slots->size()) {
+    return std::nullopt;
+  }
+  auto user = (*slots)[slot];
+  if (!user) {
+    return std::nullopt;
+  }
+  return IndexedUser{slot, std::move(user)};
 }
 
 std::optional<size_t> AclUserManager::GetUserIndex(const std::string &username) const {
@@ -350,6 +371,7 @@ void AclUserManager::SetUser(const std::string &username, std::shared_ptr<const 
   index_usernames_[slot] = username;
   updated_slots[slot] = std::move(user);
   std::atomic_store(&user_slots_, std::make_shared<const UserSlots>(std::move(updated_slots)));
+  std::atomic_store(&slot_usernames_, std::make_shared<const SlotUsernames>(index_usernames_));
 }
 
 bool AclUserManager::AddUser(const std::string &username, std::shared_ptr<const AclUser> user) {
@@ -380,6 +402,7 @@ bool AclUserManager::AddUser(const std::string &username, std::shared_ptr<const 
   index_usernames_[slot] = username;
   updated_slots[slot] = std::move(user);
   std::atomic_store(&user_slots_, std::make_shared<const UserSlots>(std::move(updated_slots)));
+  std::atomic_store(&slot_usernames_, std::make_shared<const SlotUsernames>(index_usernames_));
   return true;
 }
 
@@ -402,6 +425,7 @@ bool AclUserManager::DeleteUser(const std::string &username) {
     free_slots_.emplace_back(slot);
   }
   std::atomic_store(&user_slots_, std::make_shared<const UserSlots>(std::move(updated_slots)));
+  std::atomic_store(&slot_usernames_, std::make_shared<const SlotUsernames>(index_usernames_));
   return true;
 }
 
@@ -415,6 +439,7 @@ void AclUserManager::Reset() {
     free_slots_.emplace_back(kInitialSlotCount - i - 1);
   }
   std::atomic_store(&user_slots_, std::make_shared<const UserSlots>(kInitialSlotCount));
+  std::atomic_store(&slot_usernames_, std::make_shared<const SlotUsernames>(kInitialSlotCount));
 }
 
 std::vector<std::string> AclUserManager::ListUsernames() const {
@@ -424,18 +449,29 @@ std::vector<std::string> AclUserManager::ListUsernames() const {
   for (const auto &entry : username_index_) {
     names.emplace_back(entry.first);
   }
+  std::sort(names.begin(), names.end());
   return names;
 }
 
 std::optional<std::string> AclUserManager::GetUsernameByIndex(size_t index) const {
-  std::shared_lock<std::shared_mutex> lock(mu_);
-  if (index >= index_usernames_.size()) {
+  auto usernames = std::atomic_load(&slot_usernames_);
+  if (!usernames || index >= usernames->size()) {
     return std::nullopt;
   }
-  if (index_usernames_[index].empty()) {
+  const auto &slot_username = (*usernames)[index];
+  if (slot_username.empty()) {
     return std::nullopt;
   }
-  return index_usernames_[index];
+  return slot_username;
+}
+
+bool AclUserManager::IsUsernameMatchedByIndex(size_t index, const std::string &username) const {
+  auto usernames = std::atomic_load(&slot_usernames_);
+  if (!usernames || index >= usernames->size()) {
+    return false;
+  }
+  const auto &slot_username = (*usernames)[index];
+  return !slot_username.empty() && slot_username == username;
 }
 
 }  // namespace redis

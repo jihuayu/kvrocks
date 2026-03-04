@@ -54,10 +54,12 @@ class Acl {
   Status Del(const std::string &username);
   Status LoadAcl();
   std::optional<size_t> GetUserIndex(const std::string &username);
+  std::optional<AclUserManager::IndexedUser> GetIndexedUserByUsername(const std::string &username);
   std::shared_ptr<const AclUser> GetCachedUserByIndex(size_t index);
   std::shared_ptr<const AclUser> GetUserByUsername(const std::string &username) const;
   std::vector<std::string> ListUsers() const;
   std::optional<std::string> GetUsernameByIndex(size_t index) const;
+  bool IsUsernameMatchedByIndex(size_t index, const std::string &username) const;
 
   Status HandleSetUser(Namespace *ns_mgr, const std::string &username, const std::vector<std::string> &modifiers,
                        std::string *output, bool strict_namespace = true);
