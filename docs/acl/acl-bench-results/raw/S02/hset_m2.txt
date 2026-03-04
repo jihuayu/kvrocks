@@ -1,0 +1,59 @@
+ERROR: ERR admin permission required to perform the command
+ERROR: failed to fetch CONFIG from 127.0.0.1:7772
+WARN: could not fetch server CONFIG
+HSET: 0.00HSET: 5698.41HSET: 5816.73HSET: 5750.00HSET: 5674.65HSET: 5671.19HSET: 5773.79HSET: 5673.70HSET: 5616.58HSET: 5596.98HSET: 5603.68HSET: 5567.02HSET: 5503.66HSET: 5536.88HSET: 5546.80====== HSET ======
+  20000 requests completed in 3.59 seconds
+  50 parallel clients
+  64 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+0.00% <= 0.7 milliseconds
+0.01% <= 0.8 milliseconds
+0.03% <= 0.9 milliseconds
+0.06% <= 1.0 milliseconds
+0.10% <= 1.1 milliseconds
+0.18% <= 1.2 milliseconds
+0.32% <= 1.3 milliseconds
+0.44% <= 1.4 milliseconds
+0.59% <= 1.5 milliseconds
+0.79% <= 1.6 milliseconds
+1.05% <= 1.7 milliseconds
+1.32% <= 1.8 milliseconds
+1.57% <= 1.9 milliseconds
+1.95% <= 2 milliseconds
+7.34% <= 3 milliseconds
+14.51% <= 4 milliseconds
+22.55% <= 5 milliseconds
+30.95% <= 6 milliseconds
+41.36% <= 7 milliseconds
+50.33% <= 8 milliseconds
+60.01% <= 9 milliseconds
+67.15% <= 10 milliseconds
+73.19% <= 11 milliseconds
+78.05% <= 12 milliseconds
+82.62% <= 13 milliseconds
+86.08% <= 14 milliseconds
+89.36% <= 15 milliseconds
+92.04% <= 16 milliseconds
+94.04% <= 17 milliseconds
+95.14% <= 18 milliseconds
+96.29% <= 19 milliseconds
+97.26% <= 20 milliseconds
+97.90% <= 21 milliseconds
+98.40% <= 22 milliseconds
+98.69% <= 23 milliseconds
+98.83% <= 24 milliseconds
+99.35% <= 25 milliseconds
+99.67% <= 26 milliseconds
+99.74% <= 27 milliseconds
+99.79% <= 28 milliseconds
+99.83% <= 29 milliseconds
+99.88% <= 30 milliseconds
+99.89% <= 31 milliseconds
+99.91% <= 32 milliseconds
+99.95% <= 36 milliseconds
+100.00% <= 36 milliseconds
+5569.48 requests per second
+
+

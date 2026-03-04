@@ -1,0 +1,100 @@
+ERROR: failed to fetch CONFIG from 127.0.0.1:7771
+WARN: could not fetch server CONFIG
+HSET: -nanHSET: 5657.37HSET: 5752.50HSET: 5689.75HSET: 5675.65HSET: 5511.98HSET: 5485.35HSET: 5426.94HSET: 5391.91HSET: 5434.53HSET: 5499.80HSET: 6288.00HSET: 6220.79HSET: 57631.95HSET: 33527.88HSET: 24704.31====== HSET ======
+  20000 requests completed in 0.88 seconds
+  50 parallel clients
+  64 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+0.00% <= -2370.7 milliseconds
+0.01% <= -2370.6 milliseconds
+0.04% <= -2370.5 milliseconds
+0.04% <= -2369.5 milliseconds
+0.05% <= -2367.9 milliseconds
+0.05% <= -2367.8 milliseconds
+0.06% <= -2367.7 milliseconds
+0.07% <= -2366.7 milliseconds
+0.08% <= -2366.6 milliseconds
+0.09% <= -2366.5 milliseconds
+0.10% <= -2365.2 milliseconds
+0.10% <= -2364.8 milliseconds
+0.11% <= -2364.7 milliseconds
+0.12% <= -2364.5 milliseconds
+0.12% <= -2358.6 milliseconds
+0.14% <= -2358.5 milliseconds
+0.16% <= -2358.4 milliseconds
+0.16% <= -2358.0 milliseconds
+0.18% <= -2357.9 milliseconds
+0.19% <= -2357.8 milliseconds
+0.19% <= -2357.6 milliseconds
+0.19% <= -2356.7 milliseconds
+0.20% <= -2356.6 milliseconds
+0.20% <= -2356.4 milliseconds
+0.21% <= -2356.3 milliseconds
+0.22% <= -2356.2 milliseconds
+0.23% <= -2355.8 milliseconds
+0.24% <= -335.4 milliseconds
+0.25% <= -335.3 milliseconds
+0.28% <= -335.2 milliseconds
+0.28% <= -334.8 milliseconds
+0.28% <= -328.3 milliseconds
+0.29% <= -328.0 milliseconds
+0.31% <= -327.9 milliseconds
+0.34% <= -327.8 milliseconds
+0.35% <= -327.7 milliseconds
+0.36% <= -327.6 milliseconds
+0.38% <= -327.4 milliseconds
+0.38% <= -327.3 milliseconds
+0.38% <= -327.2 milliseconds
+0.39% <= -326.6 milliseconds
+0.40% <= -326.5 milliseconds
+0.41% <= -324.2 milliseconds
+0.41% <= -324.1 milliseconds
+0.43% <= -323.8 milliseconds
+0.44% <= 0.6 milliseconds
+0.44% <= 0.7 milliseconds
+0.45% <= 0.8 milliseconds
+0.47% <= 0.9 milliseconds
+0.50% <= 1.0 milliseconds
+0.55% <= 1.1 milliseconds
+0.62% <= 1.2 milliseconds
+0.79% <= 1.3 milliseconds
+0.96% <= 1.4 milliseconds
+1.12% <= 1.5 milliseconds
+1.35% <= 1.6 milliseconds
+1.59% <= 1.7 milliseconds
+1.92% <= 1.8 milliseconds
+2.31% <= 1.9 milliseconds
+2.69% <= 2 milliseconds
+7.84% <= 3 milliseconds
+14.90% <= 4 milliseconds
+22.27% <= 5 milliseconds
+31.00% <= 6 milliseconds
+40.12% <= 7 milliseconds
+49.63% <= 8 milliseconds
+58.22% <= 9 milliseconds
+66.43% <= 10 milliseconds
+72.83% <= 11 milliseconds
+77.75% <= 12 milliseconds
+82.29% <= 13 milliseconds
+86.37% <= 14 milliseconds
+90.26% <= 15 milliseconds
+92.15% <= 16 milliseconds
+93.89% <= 17 milliseconds
+95.28% <= 18 milliseconds
+96.58% <= 19 milliseconds
+97.32% <= 20 milliseconds
+98.15% <= 21 milliseconds
+98.77% <= 22 milliseconds
+99.12% <= 23 milliseconds
+99.38% <= 24 milliseconds
+99.61% <= 25 milliseconds
+99.76% <= 26 milliseconds
+99.86% <= 27 milliseconds
+99.88% <= 28 milliseconds
+99.92% <= 29 milliseconds
+100.00% <= 30 milliseconds
+22831.05 requests per second
+
+

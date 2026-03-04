@@ -1,0 +1,84 @@
+ERROR: failed to fetch CONFIG from 127.0.0.1:7771
+WARN: could not fetch server CONFIG
+SET: 0.00SET: 5531.75SET: 5814.74SET: 6126.33SET: 6378.24SET: 6496.41SET: 6559.55SET: 6607.53SET: 6682.98SET: 6744.01SET: 6799.52SET: 6854.03====== SET ======
+  20000 requests completed in 2.94 seconds
+  50 parallel clients
+  64 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+0.00% <= 0.7 milliseconds
+0.01% <= 0.9 milliseconds
+0.02% <= 1.0 milliseconds
+0.03% <= 1.1 milliseconds
+0.05% <= 1.2 milliseconds
+0.12% <= 1.3 milliseconds
+0.20% <= 1.4 milliseconds
+0.31% <= 1.5 milliseconds
+0.43% <= 1.6 milliseconds
+0.62% <= 1.7 milliseconds
+0.82% <= 1.8 milliseconds
+0.99% <= 1.9 milliseconds
+1.23% <= 2 milliseconds
+4.93% <= 3 milliseconds
+13.72% <= 4 milliseconds
+27.69% <= 5 milliseconds
+42.30% <= 6 milliseconds
+54.33% <= 7 milliseconds
+65.14% <= 8 milliseconds
+75.24% <= 9 milliseconds
+84.01% <= 10 milliseconds
+90.75% <= 11 milliseconds
+94.64% <= 12 milliseconds
+96.75% <= 13 milliseconds
+98.23% <= 14 milliseconds
+98.80% <= 15 milliseconds
+99.07% <= 16 milliseconds
+99.28% <= 17 milliseconds
+99.47% <= 18 milliseconds
+99.64% <= 19 milliseconds
+99.73% <= 20 milliseconds
+99.76% <= 21 milliseconds
+99.79% <= 22 milliseconds
+99.87% <= 23 milliseconds
+99.88% <= 24 milliseconds
+99.92% <= 25 milliseconds
+99.99% <= 26 milliseconds
+100.00% <= 29 milliseconds
+100.00% <= 30 milliseconds
+6800.41 requests per second
+
+GET: 6905.66GET: 10069.31GET: 11388.79GET: 12839.35GET: 13258.31GET: 13206.29====== GET ======
+  20000 requests completed in 1.49 seconds
+  50 parallel clients
+  64 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+0.49% <= 1 milliseconds
+30.17% <= 2 milliseconds
+66.00% <= 3 milliseconds
+82.50% <= 4 milliseconds
+89.95% <= 5 milliseconds
+94.32% <= 6 milliseconds
+96.33% <= 7 milliseconds
+97.39% <= 8 milliseconds
+98.22% <= 9 milliseconds
+98.89% <= 10 milliseconds
+99.19% <= 11 milliseconds
+99.50% <= 12 milliseconds
+99.63% <= 13 milliseconds
+99.75% <= 14 milliseconds
+99.78% <= 15 milliseconds
+99.79% <= 16 milliseconds
+99.88% <= 17 milliseconds
+99.93% <= 18 milliseconds
+99.94% <= 19 milliseconds
+99.96% <= 20 milliseconds
+99.98% <= 21 milliseconds
+99.99% <= 24 milliseconds
+100.00% <= 25 milliseconds
+100.00% <= 25 milliseconds
+13386.88 requests per second
+
+

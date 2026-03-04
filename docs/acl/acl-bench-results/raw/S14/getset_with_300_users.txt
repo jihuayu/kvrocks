@@ -1,0 +1,108 @@
+ERROR: ERR admin permission required to perform the command
+ERROR: failed to fetch CONFIG from 127.0.0.1:7772
+WARN: could not fetch server CONFIG
+SET: 0.00SET: 6190.48SET: 6970.12SET: 7078.35SET: 7027.92SET: 6809.26SET: 6655.36SET: 6405.59SET: 6295.56SET: 6239.24SET: 6221.33SET: 6116.60SET: 6155.79SET: 6128.46====== SET ======
+  20000 requests completed in 3.27 seconds
+  50 parallel clients
+  64 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+0.00% <= 0.8 milliseconds
+0.01% <= 0.9 milliseconds
+0.02% <= 1.0 milliseconds
+0.04% <= 1.1 milliseconds
+0.05% <= 1.2 milliseconds
+0.09% <= 1.3 milliseconds
+0.12% <= 1.4 milliseconds
+0.22% <= 1.5 milliseconds
+0.35% <= 1.6 milliseconds
+0.55% <= 1.7 milliseconds
+0.86% <= 1.8 milliseconds
+1.12% <= 1.9 milliseconds
+1.47% <= 2 milliseconds
+6.16% <= 3 milliseconds
+12.57% <= 4 milliseconds
+21.93% <= 5 milliseconds
+34.65% <= 6 milliseconds
+47.86% <= 7 milliseconds
+59.45% <= 8 milliseconds
+69.04% <= 9 milliseconds
+77.97% <= 10 milliseconds
+83.69% <= 11 milliseconds
+88.07% <= 12 milliseconds
+91.21% <= 13 milliseconds
+93.77% <= 14 milliseconds
+95.21% <= 15 milliseconds
+96.62% <= 16 milliseconds
+97.50% <= 17 milliseconds
+98.11% <= 18 milliseconds
+98.73% <= 19 milliseconds
+99.14% <= 20 milliseconds
+99.28% <= 21 milliseconds
+99.46% <= 22 milliseconds
+99.59% <= 23 milliseconds
+99.75% <= 24 milliseconds
+99.80% <= 25 milliseconds
+99.85% <= 26 milliseconds
+99.90% <= 27 milliseconds
+99.92% <= 29 milliseconds
+99.93% <= 31 milliseconds
+99.95% <= 34 milliseconds
+99.96% <= 38 milliseconds
+99.97% <= 40 milliseconds
+99.97% <= 42 milliseconds
+99.99% <= 43 milliseconds
+100.00% <= 43 milliseconds
+6119.95 requests per second
+
+GET: 7154.87GET: 8188.68GET: 7976.65GET: 8087.75GET: 8345.53GET: 8462.16GET: 8866.47GET: 9082.32====== GET ======
+  20000 requests completed in 2.14 seconds
+  50 parallel clients
+  64 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+0.17% <= 1 milliseconds
+23.58% <= 2 milliseconds
+56.14% <= 3 milliseconds
+72.02% <= 4 milliseconds
+78.65% <= 5 milliseconds
+82.52% <= 6 milliseconds
+84.94% <= 7 milliseconds
+87.13% <= 8 milliseconds
+89.22% <= 9 milliseconds
+91.00% <= 10 milliseconds
+92.50% <= 11 milliseconds
+93.81% <= 12 milliseconds
+94.82% <= 13 milliseconds
+95.43% <= 14 milliseconds
+96.07% <= 15 milliseconds
+96.64% <= 16 milliseconds
+97.28% <= 17 milliseconds
+97.57% <= 18 milliseconds
+97.82% <= 19 milliseconds
+98.33% <= 20 milliseconds
+98.92% <= 21 milliseconds
+99.07% <= 22 milliseconds
+99.13% <= 23 milliseconds
+99.23% <= 24 milliseconds
+99.32% <= 25 milliseconds
+99.47% <= 26 milliseconds
+99.57% <= 27 milliseconds
+99.61% <= 28 milliseconds
+99.65% <= 29 milliseconds
+99.68% <= 30 milliseconds
+99.69% <= 31 milliseconds
+99.71% <= 32 milliseconds
+99.73% <= 33 milliseconds
+99.75% <= 34 milliseconds
+99.76% <= 35 milliseconds
+99.79% <= 36 milliseconds
+99.90% <= 37 milliseconds
+99.94% <= 39 milliseconds
+99.99% <= 40 milliseconds
+100.00% <= 41 milliseconds
+9337.07 requests per second
+
+

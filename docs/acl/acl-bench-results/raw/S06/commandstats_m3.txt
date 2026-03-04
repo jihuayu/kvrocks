@@ -1,0 +1,7 @@
+# CommandStats
+cmdstat_acl:calls=4,usec=1234,usec_per_call=308.5
+cmdstat_auth:calls=153,usec=729,usec_per_call=4.764705882352941
+cmdstat_config:calls=2,usec=21,usec_per_call=10.5
+cmdstat_info:calls=4,usec=1587,usec_per_call=396.75
+cmdstat_ping:calls=1,usec=6,usec_per_call=6
+cmdstat_set:calls=100000,usec=26981402,usec_per_call=269.81402

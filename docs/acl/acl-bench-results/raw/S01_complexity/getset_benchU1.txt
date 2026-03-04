@@ -1,0 +1,74 @@
+ERROR: ERR admin permission required to perform the command
+ERROR: failed to fetch CONFIG from 127.0.0.1:7773
+WARN: could not fetch server CONFIG
+SET: 0.00SET: 13880.95SET: 13462.15SET: 12992.02SET: 13304.17SET: 13492.04====== SET ======
+  20000 requests completed in 1.45 seconds
+  50 parallel clients
+  64 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+0.00% <= 0.4 milliseconds
+0.01% <= 0.5 milliseconds
+0.02% <= 0.6 milliseconds
+0.06% <= 0.7 milliseconds
+0.12% <= 0.8 milliseconds
+0.38% <= 0.9 milliseconds
+0.90% <= 1.0 milliseconds
+1.77% <= 1.1 milliseconds
+3.24% <= 1.2 milliseconds
+5.20% <= 1.3 milliseconds
+8.02% <= 1.4 milliseconds
+11.36% <= 1.5 milliseconds
+15.38% <= 1.6 milliseconds
+19.83% <= 1.7 milliseconds
+24.66% <= 1.8 milliseconds
+29.57% <= 1.9 milliseconds
+34.38% <= 2 milliseconds
+70.32% <= 3 milliseconds
+84.46% <= 4 milliseconds
+90.74% <= 5 milliseconds
+93.97% <= 6 milliseconds
+95.46% <= 7 milliseconds
+96.88% <= 8 milliseconds
+97.89% <= 9 milliseconds
+98.43% <= 10 milliseconds
+98.86% <= 11 milliseconds
+99.18% <= 12 milliseconds
+99.47% <= 13 milliseconds
+99.67% <= 14 milliseconds
+99.75% <= 15 milliseconds
+99.82% <= 16 milliseconds
+99.85% <= 17 milliseconds
+99.88% <= 18 milliseconds
+99.90% <= 19 milliseconds
+99.94% <= 20 milliseconds
+99.97% <= 21 milliseconds
+99.99% <= 22 milliseconds
+100.00% <= 24 milliseconds
+13755.16 requests per second
+
+GET: 16978.72GET: 16291.95GET: 15786.88GET: 15386.53GET: 15173.79GET: 15180.35====== GET ======
+  20000 requests completed in 1.32 seconds
+  50 parallel clients
+  64 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+0.81% <= 1 milliseconds
+36.88% <= 2 milliseconds
+74.48% <= 3 milliseconds
+89.16% <= 4 milliseconds
+94.90% <= 5 milliseconds
+97.47% <= 6 milliseconds
+98.69% <= 7 milliseconds
+99.40% <= 8 milliseconds
+99.78% <= 9 milliseconds
+99.89% <= 10 milliseconds
+99.96% <= 11 milliseconds
+99.97% <= 12 milliseconds
+99.99% <= 14 milliseconds
+100.00% <= 15 milliseconds
+15174.51 requests per second
+
+

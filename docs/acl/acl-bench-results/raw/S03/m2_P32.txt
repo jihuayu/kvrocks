@@ -1,0 +1,120 @@
+ERROR: ERR admin permission required to perform the command
+ERROR: failed to fetch CONFIG from 127.0.0.1:7772
+WARN: could not fetch server CONFIG
+SET: 0.00SET: 11338.58SET: 12825.40SET: 12307.69SET: 12334.66SET: 11661.88SET: 11851.06====== SET ======
+  20032 requests completed in 1.62 seconds
+  50 parallel clients
+  64 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+0.00% <= 11 milliseconds
+0.32% <= 12 milliseconds
+0.64% <= 56 milliseconds
+0.96% <= 79 milliseconds
+1.28% <= 80 milliseconds
+2.57% <= 81 milliseconds
+3.53% <= 92 milliseconds
+3.85% <= 93 milliseconds
+4.32% <= 94 milliseconds
+6.57% <= 96 milliseconds
+7.05% <= 97 milliseconds
+8.81% <= 98 milliseconds
+9.28% <= 99 milliseconds
+9.60% <= 100 milliseconds
+11.05% <= 102 milliseconds
+12.01% <= 103 milliseconds
+12.32% <= 104 milliseconds
+12.97% <= 105 milliseconds
+13.93% <= 106 milliseconds
+16.00% <= 107 milliseconds
+18.08% <= 108 milliseconds
+20.49% <= 109 milliseconds
+20.97% <= 110 milliseconds
+23.52% <= 111 milliseconds
+24.81% <= 112 milliseconds
+26.89% <= 113 milliseconds
+30.08% <= 114 milliseconds
+30.41% <= 115 milliseconds
+32.33% <= 116 milliseconds
+33.44% <= 117 milliseconds
+38.08% <= 118 milliseconds
+44.01% <= 119 milliseconds
+47.21% <= 120 milliseconds
+47.53% <= 121 milliseconds
+48.81% <= 122 milliseconds
+50.24% <= 123 milliseconds
+52.49% <= 125 milliseconds
+53.28% <= 126 milliseconds
+54.56% <= 128 milliseconds
+54.88% <= 129 milliseconds
+55.69% <= 130 milliseconds
+57.28% <= 131 milliseconds
+57.60% <= 132 milliseconds
+57.92% <= 133 milliseconds
+62.24% <= 134 milliseconds
+65.44% <= 135 milliseconds
+66.40% <= 136 milliseconds
+66.89% <= 137 milliseconds
+69.76% <= 139 milliseconds
+70.25% <= 141 milliseconds
+72.32% <= 142 milliseconds
+73.93% <= 143 milliseconds
+74.08% <= 144 milliseconds
+75.04% <= 145 milliseconds
+76.00% <= 146 milliseconds
+77.93% <= 148 milliseconds
+79.85% <= 151 milliseconds
+82.40% <= 152 milliseconds
+83.36% <= 153 milliseconds
+84.32% <= 154 milliseconds
+88.96% <= 155 milliseconds
+89.44% <= 160 milliseconds
+89.76% <= 166 milliseconds
+89.93% <= 167 milliseconds
+90.89% <= 168 milliseconds
+92.17% <= 169 milliseconds
+93.61% <= 172 milliseconds
+95.04% <= 181 milliseconds
+97.44% <= 182 milliseconds
+98.72% <= 183 milliseconds
+99.68% <= 190 milliseconds
+100.00% <= 190 milliseconds
+12357.80 requests per second
+
+====== GET ======
+  20032 requests completed in 0.10 seconds
+  50 parallel clients
+  64 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+0.00% <= 1 milliseconds
+4.01% <= 2 milliseconds
+15.05% <= 3 milliseconds
+39.04% <= 4 milliseconds
+56.81% <= 5 milliseconds
+64.32% <= 6 milliseconds
+68.64% <= 7 milliseconds
+73.76% <= 8 milliseconds
+76.00% <= 9 milliseconds
+81.12% <= 10 milliseconds
+86.08% <= 11 milliseconds
+87.85% <= 12 milliseconds
+88.64% <= 13 milliseconds
+91.85% <= 14 milliseconds
+92.00% <= 19 milliseconds
+92.32% <= 20 milliseconds
+93.29% <= 21 milliseconds
+94.72% <= 22 milliseconds
+94.89% <= 23 milliseconds
+95.36% <= 24 milliseconds
+96.32% <= 25 milliseconds
+96.49% <= 26 milliseconds
+96.64% <= 28 milliseconds
+97.12% <= 29 milliseconds
+99.53% <= 30 milliseconds
+100.00% <= 30 milliseconds
+202343.44 requests per second
+
+
