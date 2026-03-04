@@ -24,6 +24,7 @@
 #include <cctype>
 #include <chrono>
 #include <ctime>
+#include <set>
 #include <memory>
 #include <optional>
 #include <random>
@@ -47,6 +48,32 @@
 #include "vendor/sha256.h"
 
 namespace redis {
+
+namespace {
+
+// Returns true if channel permissions were tightened (new user allows fewer channels than old).
+bool IsChannelScopeTightened(const std::shared_ptr<const redis::AclUser> &old_user,
+                              const std::shared_ptr<const redis::AclUser> &new_user) {
+  if (!old_user || !new_user) return false;
+  // Check if old user had allchannels and new user doesn't.
+  bool old_allchannels = std::any_of(old_user->allowed_commands.begin(), old_user->allowed_commands.end(),
+                                     [](const auto &s) { return (s.flags & kAclSelectorAllChannels) != 0; });
+  bool new_allchannels = std::any_of(new_user->allowed_commands.begin(), new_user->allowed_commands.end(),
+                                     [](const auto &s) { return (s.flags & kAclSelectorAllChannels) != 0; });
+  if (old_allchannels && !new_allchannels) return true;
+  // Check if channel patterns were reduced.
+  std::set<std::string> old_channels, new_channels;
+  for (const auto &sel : old_user->allowed_commands) {
+    for (const auto &ch : sel.channels) old_channels.insert(ch);
+  }
+  for (const auto &sel : new_user->allowed_commands) {
+    for (const auto &ch : sel.channels) new_channels.insert(ch);
+  }
+  return old_channels != new_channels && !std::includes(new_channels.begin(), new_channels.end(),
+                                                         old_channels.begin(), old_channels.end());
+}
+
+}  // namespace
 
 class CommandAuth : public Commander {
  public:
@@ -1811,9 +1838,19 @@ class CommandAcl : public Commander {
 
     auto *acl = srv->GetAcl();
     switch (subcommand_) {
-      case Subcommand::kSetUser:
-        return acl->HandleSetUser(srv->GetNamespace(), username_, modifiers_, output,
-                                  srv->GetConfig()->acl_namespace_strict);
+      case Subcommand::kSetUser: {
+        // Capture channel permissions before update to detect tightening.
+        auto old_user = acl->GetUserByUsername(username_);
+        auto s = acl->HandleSetUser(srv->GetNamespace(), username_, modifiers_, output,
+                                    srv->GetConfig()->acl_namespace_strict);
+        if (!s.IsOK()) return s;
+        // If channel permissions were tightened, kill existing connections for this user.
+        if (IsChannelScopeTightened(old_user, acl->GetUserByUsername(username_))) {
+          int64_t killed = 0;
+          srv->KillClientByAclUser(&killed, username_, false, conn);
+        }
+        return Status::OK();
+      }
       case Subcommand::kGetUser:
         return acl->HandleGetUser(conn, username_, output);
       case Subcommand::kWhoAmI:
@@ -1890,7 +1927,7 @@ class CommandAcl : public Commander {
                   "This Redis instance is not configured to use an ACL file. "
                   "Please set an ACL file before using ACL LOAD or ACL SAVE"};
         }
-        auto s = acl->LoadAclFromFile(aclfile);
+        auto s = acl->LoadAclFromFile(aclfile, srv->GetNamespace(), srv->GetConfig()->acl_namespace_strict);
         if (!s.IsOK()) {
           return s;
         }

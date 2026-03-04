@@ -55,6 +55,7 @@ class Acl {
   Status LoadAcl();
   std::optional<size_t> GetUserIndex(const std::string &username);
   std::shared_ptr<const AclUser> GetCachedUserByIndex(size_t index);
+  std::shared_ptr<const AclUser> GetUserByUsername(const std::string &username) const;
   std::vector<std::string> ListUsers() const;
   std::optional<std::string> GetUsernameByIndex(size_t index) const;
 
@@ -77,7 +78,8 @@ class Acl {
   AclLog &GetAclLog() { return acl_log_; }
 
   // Load ACL users from an ACL file (one "user ..." line per line).
-  Status LoadAclFromFile(const std::string &path);
+  // ns_mgr and strict_namespace are used for namespace validation, consistent with SETUSER.
+  Status LoadAclFromFile(const std::string &path, Namespace *ns_mgr = nullptr, bool strict_namespace = true);
   // Save all ACL users to an ACL file in "ACL LIST" format.
   Status SaveAclToFile(const std::string &path) const;
 

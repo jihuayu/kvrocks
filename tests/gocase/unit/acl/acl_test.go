@@ -1317,7 +1317,7 @@ func TestACLAuthFailurePreservesSession(t *testing.T) {
 		conn.MustRead(t, "+PONG")
 
 		// Now attempt AUTH with wrong password - must fail.
-		require.NoError(t, conn.WriteArgs("AUTH", "wrongpassword"))
+		require.NoError(t, conn.WriteArgs("AUTH", "restricted", "wrongpassword"))
 		line, err := conn.ReadLine()
 		require.NoError(t, err)
 		require.Contains(t, line, "Invalid password", "expected auth failure error")
@@ -1336,8 +1336,7 @@ func TestACLAuthFailurePreservesSession(t *testing.T) {
 
 		// Authenticate via HELLO AUTH.
 		require.NoError(t, conn.WriteArgs("HELLO", "2", "AUTH", "restricted", "secret"))
-		_, err := conn.ReadLine()
-		require.NoError(t, err)
+		require.NoError(t, conn.DrainResponse())
 
 		// Attempt HELLO with wrong credentials.
 		require.NoError(t, conn.WriteArgs("HELLO", "2", "AUTH", "restricted", "wrongpassword"))

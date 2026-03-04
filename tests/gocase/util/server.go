@@ -241,7 +241,7 @@ func StartServerWithCLIOptions(
 
 	dir := *workspace
 	require.NotEmpty(t, dir, "please set the workspace by `-workspace`")
-	dir, err = os.MkdirTemp(dir, fmt.Sprintf("%s-%d-*", t.Name(), time.Now().UnixMilli()))
+	dir, err = os.MkdirTemp(dir, fmt.Sprintf("%s-%d-*", regexp.MustCompile(`[^a-zA-Z0-9_-]`).ReplaceAllString(t.Name(), "_"), time.Now().UnixMilli()))
 	require.NoError(t, err)
 	configs["dir"] = dir
 
