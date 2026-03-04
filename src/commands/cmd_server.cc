@@ -1802,8 +1802,18 @@ class CommandAcl : public Commander {
         return acl->HandleList(conn, output);
       case Subcommand::kCat:
         return acl->HandleCat(conn, category_, output);
-      case Subcommand::kDelUser:
-        return acl->HandleDelUser(usernames_, output);
+      case Subcommand::kDelUser: {
+        std::vector<std::string> deleted_users;
+        auto status = acl->HandleDelUser(usernames_, &deleted_users, output);
+        if (!status.IsOK()) {
+          return status;
+        }
+        for (const auto &username : deleted_users) {
+          int64_t killed = 0;
+          srv->KillClientByAclUser(&killed, username, false, conn);
+        }
+        return Status::OK();
+      }
       case Subcommand::kGenPass:
         *output = redis::BulkString(GenerateRandomHex(static_cast<size_t>((genpass_bits_ + 3) / 4)));
         return Status::OK();

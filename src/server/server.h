@@ -33,6 +33,7 @@
 #include <set>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -307,6 +308,7 @@ class Server {
   uint64_t GetClientID();
   void KillClient(int64_t *killed, const std::string &addr, uint64_t id, uint64_t type, bool skipme,
                   redis::Connection *conn);
+  void KillClientByAclUser(int64_t *killed, std::string_view acl_username, bool skipme, redis::Connection *conn);
 
   Status ScriptExists(const std::string &sha) const;
   Status ScriptGet(const std::string &sha, std::string *body) const;

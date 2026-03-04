@@ -1784,6 +1784,19 @@ void Server::KillClient(int64_t *killed, const std::string &addr, uint64_t id, u
   }
 }
 
+void Server::KillClientByAclUser(int64_t *killed, std::string_view acl_username, bool skipme, redis::Connection *conn) {
+  *killed = 0;
+  if (acl_username.empty()) {
+    return;
+  }
+
+  for (const auto &t : worker_threads_) {
+    int64_t killed_in_worker = 0;
+    t->GetWorker()->KillClientByAclUser(conn, acl_username, skipme, &killed_in_worker);
+    *killed += killed_in_worker;
+  }
+}
+
 ReplState Server::GetReplicationState() {
   std::lock_guard<std::mutex> guard(slaveof_mu_);
   if (IsSlave() && replication_thread_) {
