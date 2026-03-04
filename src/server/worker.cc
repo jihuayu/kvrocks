@@ -551,6 +551,28 @@ void Worker::KillClient(redis::Connection *self, uint64_t id, const std::string 
   }
 }
 
+void Worker::KillClientByAclUser(redis::Connection *self, std::string_view acl_username, bool skipme, int64_t *killed) {
+  if (acl_username.empty()) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> guard(conns_mu_);
+  for (const auto &iter : conns_) {
+    redis::Connection *conn = iter.second;
+    if (skipme && self == conn) continue;
+    if (conn->IsFlagEnabled(redis::Connection::kCloseAfterReply)) continue;
+    if (!conn->HasAclProfile()) continue;
+    if (conn->GetAclUsername() != acl_username) continue;
+
+    conn->EnableFlag(redis::Connection::kCloseAfterReply);
+    if (!conn->IsFlagEnabled(redis::Connection::kSlave)) {
+      auto bev = conn->GetBufferEvent();
+      bufferevent_enable(bev, EV_WRITE);
+    }
+    (*killed)++;
+  }
+}
+
 void Worker::LuaReset() {
   auto lua = lua_.exchange(lua::CreateState());
   lua::DestroyState(lua);

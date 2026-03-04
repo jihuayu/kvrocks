@@ -663,6 +663,18 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
       continue;
     }
 
+    if (config->acl_preview_enabled && !IsAdmin() && HasAclProfile()) {
+      auto acl_status = CheckAclCommandAllowed(srv_->GetAcl(), attributes, cmd_tokens, cmd_flags);
+      if (!acl_status.IsOK()) {
+        // Keep ASKING as one-shot for requests rejected by ACL.
+        if (IsFlagEnabled(kAsking)) {
+          DisableFlag(kAsking);
+        }
+        Reply(redis::Error(acl_status));
+        continue;
+      }
+    }
+
     if (config->cluster_enabled) {
       s = srv_->cluster->CanExecByMySelf(attributes, cmd_tokens, this);
       if (!s.IsOK()) {
@@ -674,14 +686,6 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
     // reset the ASKING flag after executing the next query
     if (IsFlagEnabled(kAsking)) {
       DisableFlag(kAsking);
-    }
-
-    if (config->acl_preview_enabled && !IsAdmin() && HasAclProfile()) {
-      auto acl_status = CheckAclCommandAllowed(srv_->GetAcl(), attributes, cmd_tokens, cmd_flags);
-      if (!acl_status.IsOK()) {
-        Reply(redis::Error(acl_status));
-        continue;
-      }
     }
 
     multi_error_exit.Disable();

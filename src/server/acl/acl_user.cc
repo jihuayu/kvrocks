@@ -280,24 +280,21 @@ AclSelector &EnsureRootSelector(AclUser &user) {
 }
 
 AclUserManager::AclUserManager() {
-  user_array_.fill(nullptr);
+  user_slots_ = std::make_shared<const UserSlots>(kInitialSlotCount);
+  index_usernames_.assign(kInitialSlotCount, "");
+  free_slots_.reserve(kInitialSlotCount);
+  for (size_t i = 0; i < kInitialSlotCount; ++i) {
+    free_slots_.emplace_back(kInitialSlotCount - i - 1);
+  }
   // TODO: Load persisted ACL users and populate username_index_.
 }
 
-std::optional<size_t> AclUserManager::findFreeSlotLocked() const {
-  for (size_t i = 0; i < user_array_.size(); ++i) {
-    if (!std::atomic_load(&user_array_[i])) {
-      return i;
-    }
-  }
-  return std::nullopt;
-}
-
 std::shared_ptr<const AclUser> AclUserManager::GetUserByIndex(size_t index) {
-  if (index >= user_array_.size()) {
+  auto slots = std::atomic_load(&user_slots_);
+  if (!slots || index >= slots->size()) {
     return nullptr;
   }
-  return std::atomic_load(&user_array_[index]);
+  return (*slots)[index];
 }
 
 std::shared_ptr<const AclUser> AclUserManager::GetUserByUserName(const std::string &username) {
@@ -306,9 +303,12 @@ std::shared_ptr<const AclUser> AclUserManager::GetUserByUserName(const std::stri
   if (iter == username_index_.end()) {
     return nullptr;
   }
-  const auto slot = static_cast<size_t>(iter->second);
-  lock.unlock();
-  return GetUserByIndex(slot);
+  const size_t slot = iter->second;
+  auto slots = std::atomic_load(&user_slots_);
+  if (!slots || slot >= slots->size()) {
+    return nullptr;
+  }
+  return (*slots)[slot];
 }
 
 std::optional<size_t> AclUserManager::GetUserIndex(const std::string &username) const {
@@ -320,23 +320,36 @@ std::optional<size_t> AclUserManager::GetUserIndex(const std::string &username) 
   return iter->second;
 }
 
-bool AclUserManager::SetUser(const std::string &username, std::shared_ptr<const AclUser> user) {
+void AclUserManager::SetUser(const std::string &username, std::shared_ptr<const AclUser> user) {
   std::unique_lock<std::shared_mutex> lock(mu_);
+  auto slots_snapshot = std::atomic_load(&user_slots_);
+  UserSlots updated_slots = slots_snapshot ? *slots_snapshot : UserSlots{};
+
   auto iter = username_index_.find(username);
   size_t slot = 0;
   if (iter == username_index_.end()) {
-    auto free_slot = findFreeSlotLocked();
-    if (!free_slot.has_value()) {
-      return false;
+    if (!free_slots_.empty()) {
+      slot = free_slots_.back();
+      free_slots_.pop_back();
+    } else {
+      slot = updated_slots.size();
+      updated_slots.emplace_back(nullptr);
+      index_usernames_.emplace_back("");
     }
-    slot = free_slot.value();
     username_index_[username] = slot;
   } else {
     slot = iter->second;
   }
 
-  std::atomic_store(&user_array_[slot], std::move(user));
-  return true;
+  if (slot >= updated_slots.size()) {
+    updated_slots.resize(slot + 1);
+  }
+  if (slot >= index_usernames_.size()) {
+    index_usernames_.resize(slot + 1);
+  }
+  index_usernames_[slot] = username;
+  updated_slots[slot] = std::move(user);
+  std::atomic_store(&user_slots_, std::make_shared<const UserSlots>(std::move(updated_slots)));
 }
 
 bool AclUserManager::AddUser(const std::string &username, std::shared_ptr<const AclUser> user) {
@@ -345,14 +358,28 @@ bool AclUserManager::AddUser(const std::string &username, std::shared_ptr<const 
     return false;
   }
 
-  auto free_slot = findFreeSlotLocked();
-  if (!free_slot.has_value()) {
-    return false;
+  auto slots_snapshot = std::atomic_load(&user_slots_);
+  UserSlots updated_slots = slots_snapshot ? *slots_snapshot : UserSlots{};
+  size_t slot = 0;
+  if (!free_slots_.empty()) {
+    slot = free_slots_.back();
+    free_slots_.pop_back();
+  } else {
+    slot = updated_slots.size();
+    updated_slots.emplace_back(nullptr);
+    index_usernames_.emplace_back("");
   }
-  const size_t slot = free_slot.value();
+  if (slot >= updated_slots.size()) {
+    updated_slots.resize(slot + 1);
+  }
+  if (slot >= index_usernames_.size()) {
+    index_usernames_.resize(slot + 1);
+  }
 
   username_index_.emplace(username, slot);
-  std::atomic_store(&user_array_[slot], std::move(user));
+  index_usernames_[slot] = username;
+  updated_slots[slot] = std::move(user);
+  std::atomic_store(&user_slots_, std::make_shared<const UserSlots>(std::move(updated_slots)));
   return true;
 }
 
@@ -363,18 +390,31 @@ bool AclUserManager::DeleteUser(const std::string &username) {
     return false;
   }
 
-  const auto slot = static_cast<size_t>(iter->second);
+  const size_t slot = iter->second;
   username_index_.erase(iter);
-  std::atomic_store(&user_array_[slot], std::shared_ptr<const AclUser>{});
+  auto slots_snapshot = std::atomic_load(&user_slots_);
+  UserSlots updated_slots = slots_snapshot ? *slots_snapshot : UserSlots{};
+  if (slot < updated_slots.size()) {
+    updated_slots[slot].reset();
+  }
+  if (slot < index_usernames_.size() && !index_usernames_[slot].empty()) {
+    index_usernames_[slot].clear();
+    free_slots_.emplace_back(slot);
+  }
+  std::atomic_store(&user_slots_, std::make_shared<const UserSlots>(std::move(updated_slots)));
   return true;
 }
 
 void AclUserManager::Reset() {
   std::unique_lock<std::shared_mutex> lock(mu_);
   username_index_.clear();
-  for (auto &slot : user_array_) {
-    std::atomic_store(&slot, std::shared_ptr<const AclUser>{});
+  index_usernames_.assign(kInitialSlotCount, "");
+  free_slots_.clear();
+  free_slots_.reserve(kInitialSlotCount);
+  for (size_t i = 0; i < kInitialSlotCount; ++i) {
+    free_slots_.emplace_back(kInitialSlotCount - i - 1);
   }
+  std::atomic_store(&user_slots_, std::make_shared<const UserSlots>(kInitialSlotCount));
 }
 
 std::vector<std::string> AclUserManager::ListUsernames() const {
@@ -389,12 +429,13 @@ std::vector<std::string> AclUserManager::ListUsernames() const {
 
 std::optional<std::string> AclUserManager::GetUsernameByIndex(size_t index) const {
   std::shared_lock<std::shared_mutex> lock(mu_);
-  for (const auto &entry : username_index_) {
-    if (entry.second == index) {
-      return entry.first;
-    }
+  if (index >= index_usernames_.size()) {
+    return std::nullopt;
   }
-  return std::nullopt;
+  if (index_usernames_[index].empty()) {
+    return std::nullopt;
+  }
+  return index_usernames_[index];
 }
 
 }  // namespace redis

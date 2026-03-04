@@ -29,8 +29,8 @@
 #include <vector>
 
 #include "acl_actions.h"
-#include "commands/error_constants.h"
 #include "commands/commander.h"
+#include "commands/error_constants.h"
 #include "common/db_util.h"
 #include "common/string_util.h"
 #include "server/namespace.h"
@@ -198,9 +198,7 @@ StatusOr<AclUser> Acl::Get(const std::string &username) {
 Status Acl::Set(const std::string &username, const AclUser &user) {
   auto previous = user_manager_->GetUserByUserName(username);
   auto new_entry = std::make_shared<const AclUser>(user);
-  if (!user_manager_->SetUser(username, new_entry)) {
-    return {Status::NotOK, "maximum number of ACL users reached"};
-  }
+  user_manager_->SetUser(username, new_entry);
 
   auto status = PersistAclUser(storage_, username, user);
   if (!status.IsOK()) {
@@ -277,7 +275,7 @@ Status Acl::LoadAcl() {
   auto new_manager = std::make_unique<AclUserManager>();
   for (auto &entry : loaded_users) {
     if (!new_manager->AddUser(entry.first, entry.second)) {
-      return {Status::NotOK, "maximum number of ACL users reached"};
+      return {Status::NotOK, "failed to populate ACL user cache"};
     }
   }
 
@@ -442,9 +440,14 @@ Status Acl::HandleCat(Connection *conn, const std::optional<std::string> &catego
   return Status::OK();
 }
 
-Status Acl::HandleDelUser(const std::vector<std::string> &usernames, std::string *output) {
+Status Acl::HandleDelUser(const std::vector<std::string> &usernames, std::vector<std::string> *deleted_usernames,
+                          std::string *output) {
   if (usernames.empty()) {
     return {Status::RedisParseErr, errWrongNumOfArguments};
+  }
+
+  if (deleted_usernames) {
+    deleted_usernames->clear();
   }
 
   int64_t deleted = 0;
@@ -460,6 +463,9 @@ Status Acl::HandleDelUser(const std::vector<std::string> &usernames, std::string
       return s;
     }
     ++deleted;
+    if (deleted_usernames) {
+      deleted_usernames->emplace_back(username);
+    }
   }
 
   *output = redis::Integer(deleted);
@@ -504,8 +510,8 @@ Status Acl::HandleDryRun(Connection *conn, const std::string &username, const st
   auto previous_user = had_acl_profile ? GetCachedUserByIndex(previous_user_index) : nullptr;
 
   conn->SetAclProfile(username, *user_index, user);
-  auto acl_status = conn->CheckAclCommandAllowed(this, attributes, command_tokens,
-                                                 attributes->GenerateFlags(command_tokens, *conn->GetServer()->GetConfig()));
+  auto acl_status = conn->CheckAclCommandAllowed(
+      this, attributes, command_tokens, attributes->GenerateFlags(command_tokens, *conn->GetServer()->GetConfig()));
   if (had_acl_profile && previous_user) {
     conn->SetAclProfile(previous_username, previous_user_index, previous_user);
   } else {
@@ -534,9 +540,7 @@ Status Acl::ApplyReplicatedUpdate(const std::string &username, const std::string
   }
 
   auto new_entry = std::make_shared<const AclUser>(user_or.GetValue());
-  if (!user_manager_->SetUser(username, new_entry)) {
-    return {Status::NotOK, "maximum number of ACL users reached"};
-  }
+  user_manager_->SetUser(username, new_entry);
 
   return Status::OK();
 }

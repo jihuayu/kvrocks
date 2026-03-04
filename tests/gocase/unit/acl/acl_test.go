@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/apache/kvrocks/tests/gocase/util"
 	"github.com/redis/go-redis/v9"
@@ -942,4 +943,72 @@ func TestACLSetUserRejectsInvalidUsername(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "invalid characters")
 	}
+}
+
+func TestACLChecksBeforeClusterRedirect(t *testing.T) {
+	ctx := context.Background()
+
+	srv1 := util.StartServer(t, map[string]string{"cluster-enabled": "yes", "acl-preview-enabled": "yes"})
+	defer srv1.Close()
+	admin1 := srv1.NewClient()
+	defer func() { require.NoError(t, admin1.Close()) }()
+	nodeID1 := "07c37dfeb235213a872192d90877d0cd55635b91"
+	require.NoError(t, admin1.Do(ctx, "clusterx", "SETNODEID", nodeID1).Err())
+
+	srv2 := util.StartServer(t, map[string]string{"cluster-enabled": "yes", "acl-preview-enabled": "yes"})
+	defer srv2.Close()
+	admin2 := srv2.NewClient()
+	defer func() { require.NoError(t, admin2.Close()) }()
+	nodeID2 := "07c37dfeb235213a872192d90877d0cd55635b92"
+	require.NoError(t, admin2.Do(ctx, "clusterx", "SETNODEID", nodeID2).Err())
+
+	clusterNodes := fmt.Sprintf("%s %s %d master - 0-16383\n", nodeID1, srv1.Host(), srv1.Port())
+	clusterNodes += fmt.Sprintf("%s %s %d master -", nodeID2, srv2.Host(), srv2.Port())
+	require.NoError(t, admin2.Do(ctx, "clusterx", "SETNODES", clusterNodes, "2").Err())
+	require.NoError(t, admin1.Do(ctx, "clusterx", "SETNODES", clusterNodes, "2").Err())
+
+	require.NoError(t,
+		admin2.Do(ctx, "ACL", "SETUSER", "redirect_order", "reset", "on", ">p", "+get", "resetkeys", "~allow:*").Err())
+
+	userClient := srv2.NewClientWithOption(&redis.Options{
+		Username: "redirect_order",
+		Password: "p",
+		PoolSize: 1,
+	})
+	defer func() { require.NoError(t, userClient.Close()) }()
+
+	err := userClient.Get(ctx, util.SlotTable[0]).Err()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "NOPERM")
+	require.NotContains(t, err.Error(), "MOVED")
+}
+
+func TestACLDelUserDisconnectsUserConnections(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "victim", "on", ">p", "+ping", "~*").Err())
+
+	userConn := srv.NewTCPClient()
+	defer func() { require.NoError(t, userConn.Close()) }()
+	require.NoError(t, userConn.WriteArgs("AUTH", "victim", "p"))
+	userConn.MustRead(t, "+OK")
+	require.NoError(t, userConn.WriteArgs("PING"))
+	userConn.MustRead(t, "+PONG")
+
+	res, err := admin.Do(ctx, "ACL", "DELUSER", "victim").Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), res)
+
+	require.Eventually(t, func() bool {
+		if err := userConn.WriteArgs("PING"); err != nil {
+			return true
+		}
+		_, err := userConn.ReadLine()
+		return err != nil
+	}, 5*time.Second, 50*time.Millisecond)
 }

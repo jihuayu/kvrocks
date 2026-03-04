@@ -20,7 +20,6 @@
 
 #pragma once
 
-#include <array>
 #include <atomic>
 #include <cstdint>
 #include <map>
@@ -96,7 +95,7 @@ class AclUserManager {
   std::shared_ptr<const AclUser> GetUserByIndex(size_t index);
   std::shared_ptr<const AclUser> GetUserByUserName(const std::string &username);
   std::optional<size_t> GetUserIndex(const std::string &username) const;
-  bool SetUser(const std::string &username, std::shared_ptr<const AclUser> user);
+  void SetUser(const std::string &username, std::shared_ptr<const AclUser> user);
   bool AddUser(const std::string &username, std::shared_ptr<const AclUser> user);
   bool DeleteUser(const std::string &username);
   void Reset();
@@ -104,12 +103,18 @@ class AclUserManager {
   std::optional<std::string> GetUsernameByIndex(size_t index) const;
 
  private:
-  std::optional<size_t> findFreeSlotLocked() const;
+  using UserSlots = std::vector<std::shared_ptr<const AclUser>>;
+  static constexpr size_t kInitialSlotCount = 256;
+
   mutable std::shared_mutex mu_;
-  // username to user_array_ index mapping
+  // username to slot index mapping
   std::map<std::string, size_t> username_index_;
-  // lock free fixed-size array to store users
-  std::array<std::shared_ptr<const AclUser>, 256> user_array_;
+  // slot index to username mapping, empty string means free slot
+  std::vector<std::string> index_usernames_;
+  // reusable free slot stack
+  std::vector<size_t> free_slots_;
+  // lock-free snapshot of user slots (read path uses atomic load only)
+  std::shared_ptr<const UserSlots> user_slots_;
 };
 
 }  // namespace redis

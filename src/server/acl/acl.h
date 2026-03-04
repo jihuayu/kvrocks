@@ -64,7 +64,8 @@ class Acl {
   Status HandleUsers(Connection *conn, std::string *output) const;
   Status HandleList(Connection *conn, std::string *output) const;
   Status HandleCat(Connection *conn, const std::optional<std::string> &category, std::string *output) const;
-  Status HandleDelUser(const std::vector<std::string> &usernames, std::string *output);
+  Status HandleDelUser(const std::vector<std::string> &usernames, std::vector<std::string> *deleted_usernames,
+                       std::string *output);
   Status HandleDryRun(Connection *conn, const std::string &username, const std::vector<std::string> &command_tokens,
                       std::string *output);
 
