@@ -67,6 +67,41 @@ func (c *TCPClient) ReadLine() (string, error) {
 	return strings.TrimSuffix(r, "\r\n"), nil
 }
 
+// DrainResponse reads and discards a complete RESP response from the buffer.
+func (c *TCPClient) DrainResponse() error {
+	line, err := c.ReadLine()
+	if err != nil {
+		return err
+	}
+	if len(line) == 0 {
+		return nil
+	}
+	switch line[0] {
+	case '+', '-', ':':
+		// single-line types
+	case '$':
+		n, _ := strconv.Atoi(line[1:])
+		if n >= 0 {
+			_, err = c.ReadLine() // read bulk string data
+		}
+	case '*':
+		n, _ := strconv.Atoi(line[1:])
+		for i := 0; i < n; i++ {
+			if err = c.DrainResponse(); err != nil {
+				return err
+			}
+		}
+	case '%':
+		n, _ := strconv.Atoi(line[1:])
+		for i := 0; i < n*2; i++ {
+			if err = c.DrainResponse(); err != nil {
+				return err
+			}
+		}
+	}
+	return err
+}
+
 func (c *TCPClient) MustRead(t testing.TB, s string) {
 	r, err := c.ReadLine()
 	require.NoError(t, err)

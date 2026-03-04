@@ -245,6 +245,10 @@ bool Connection::HasAclAllKeysAccess() const {
   if (!acl_enforced_ || !acl_user_) return true;
   for (const auto &selector : acl_user_->allowed_commands) {
     if ((selector.flags & redis::kAclSelectorAllKeys) != 0) return true;
+    // ~* (wildcard pattern) is equivalent to allkeys
+    for (const auto &kp : selector.key_patterns) {
+      if (kp.pattern == "*" && (kp.flags & redis::kAclKeyAll) == redis::kAclKeyAll) return true;
+    }
   }
   return false;
 }
@@ -349,6 +353,16 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
   if (!cached_user) {
     // Fail closed: deauthenticate the connection and require re-authentication.
     // This prevents a weakened long-lived session when the ACL user has been deleted/reloaded.
+    ClearAclProfile();
+    ns_.clear();
+    is_admin_ = false;
+    if (deny_reason_out) *deny_reason_out = AclDenyReason::None;
+    return {Status::RedisNoAuth, "Authentication required"};
+  }
+
+  // Verify username at slot matches the stored identity to guard against slot reuse races.
+  auto slot_username = acl->GetUsernameByIndex(acl_user_index_);
+  if (!slot_username.has_value() || slot_username.value() != acl_username_) {
     ClearAclProfile();
     ns_.clear();
     is_admin_ = false;
@@ -699,7 +713,9 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
       continue;
     }
 
-    if (config->acl_preview_enabled && !IsAdmin() && HasAclProfile()) {
+    // Auth commands (AUTH, HELLO AUTH) must always be executable regardless of ACL permissions,
+    // so users can re-authenticate or correct their credentials.
+    if (config->acl_preview_enabled && !IsAdmin() && HasAclProfile() && !(cmd_flags & kCmdAuth)) {
       AclDenyReason deny_reason = AclDenyReason::None;
       auto acl_status = CheckAclCommandAllowed(srv_->GetAcl(), attributes, cmd_tokens, cmd_flags, &deny_reason);
       if (!acl_status.IsOK()) {

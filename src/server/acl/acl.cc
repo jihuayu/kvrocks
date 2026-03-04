@@ -310,6 +310,13 @@ std::shared_ptr<const AclUser> Acl::GetCachedUserByIndex(size_t index) {
   return user_manager_->GetUserByIndex(index);
 }
 
+std::shared_ptr<const AclUser> Acl::GetUserByUsername(const std::string &username) const {
+  if (!user_manager_) {
+    return nullptr;
+  }
+  return user_manager_->GetUserByUserName(username);
+}
+
 std::vector<std::string> Acl::ListUsers() const {
   if (!user_manager_) {
     return {};
@@ -570,13 +577,13 @@ Status Acl::ApplyReplicatedDeletion(const std::string &username) {
   return Status::OK();
 }
 
-Status Acl::LoadAclFromFile(const std::string &path) {
+Status Acl::LoadAclFromFile(const std::string &path, Namespace *ns_mgr, bool strict_namespace) {
   std::ifstream file(path);
   if (!file.is_open()) {
     return {Status::NotOK, "Failed to open ACL file: " + path};
   }
 
-  // Parse all lines first; abort on any error before making changes.
+  // Phase 1: Parse all lines. Abort on any parse error before making any state changes.
   struct ParsedLine {
     std::string username;
     std::vector<std::string> modifiers;
@@ -586,11 +593,9 @@ Status Acl::LoadAclFromFile(const std::string &path) {
   int line_num = 0;
   while (std::getline(file, line)) {
     ++line_num;
-    // Strip trailing CR
     if (!line.empty() && line.back() == '\r') {
       line.pop_back();
     }
-    // Skip blank lines and comments
     size_t first_non_space = line.find_first_not_of(" \t");
     if (first_non_space == std::string::npos || line[first_non_space] == '#') {
       continue;
@@ -615,28 +620,69 @@ Status Acl::LoadAclFromFile(const std::string &path) {
     return {Status::NotOK, "Error reading ACL file: " + path};
   }
 
-  // Collect usernames present in file
+  // Phase 2: Validate and build all AclUser objects without touching current state.
+  // This ensures namespace and modifier errors are caught before any mutation.
+  std::vector<std::pair<std::string, AclUser>> staged_users;
+  staged_users.reserve(parsed_lines.size());
+  for (const auto &pl : parsed_lines) {
+    if (pl.username.empty() || HasInvalidUsernameChar(pl.username)) {
+      return {Status::NotOK, fmt::format("ACL file user '{}': invalid username", pl.username)};
+    }
+
+    auto user_namespace_or = DetermineNamespace(ns_mgr, pl.username, strict_namespace);
+    if (!user_namespace_or.IsOK()) {
+      return user_namespace_or.ToStatus().Prefixed(fmt::format("ACL file user '{}'", pl.username));
+    }
+
+    AclUser user;
+    user.ns = user_namespace_or.GetValue();
+    ResetUserState(user);
+
+    auto merged_modifiers_or = MergeSelectorArguments(pl.modifiers);
+    if (!merged_modifiers_or.IsOK()) {
+      return merged_modifiers_or.ToStatus().Prefixed(fmt::format("ACL file user '{}'", pl.username));
+    }
+
+    for (const auto &token : merged_modifiers_or.GetValue()) {
+      std::vector<SetUserAction> actions;
+      auto s = ParseSetUserToken(token, &actions);
+      if (!s.IsOK()) {
+        return s.Prefixed(fmt::format("ACL file user '{}'", pl.username));
+      }
+      for (const auto &action : actions) {
+        auto as = ApplySetUserAction(user, action);
+        if (!as.IsOK()) {
+          return as.Prefixed(fmt::format("ACL file user '{}'", pl.username));
+        }
+      }
+    }
+
+    staged_users.emplace_back(pl.username, std::move(user));
+  }
+
+  // Phase 3: Atomically swap the in-memory user manager with the staged state.
+  auto new_manager = std::make_unique<AclUserManager>();
+  for (const auto &entry : staged_users) {
+    new_manager->AddUser(entry.first, std::make_shared<const AclUser>(entry.second));
+  }
+  auto old_manager = std::move(user_manager_);
+  user_manager_ = std::move(new_manager);
+
+  // Phase 4: Persist changes to storage. Remove old users not in file; write new/updated users.
+  // On storage errors we log best-effort; the in-memory state is already consistent.
   std::set<std::string> file_usernames;
-  for (const auto &pl : parsed_lines) {
-    file_usernames.insert(pl.username);
+  for (const auto &entry : staged_users) {
+    file_usernames.insert(entry.first);
   }
-
-  // Delete users present in storage but not in file (except "default" stays unless file has it)
-  auto existing = ListUsers();
-  for (const auto &existing_name : existing) {
-    if (file_usernames.find(existing_name) == file_usernames.end()) {
-      auto s = Del(existing_name);
-      (void)s;  // best-effort; continue even on error
+  if (old_manager) {
+    for (const auto &existing_name : old_manager->ListUsernames()) {
+      if (file_usernames.find(existing_name) == file_usernames.end()) {
+        (void)RemoveAclUser(storage_, existing_name);
+      }
     }
   }
-
-  // Apply all users from file
-  std::string dummy_output;
-  for (const auto &pl : parsed_lines) {
-    auto s = HandleSetUser(nullptr, pl.username, pl.modifiers, &dummy_output);
-    if (!s.IsOK()) {
-      return s.Prefixed(fmt::format("ACL file user '{}'", pl.username));
-    }
+  for (const auto &entry : staged_users) {
+    (void)PersistAclUser(storage_, entry.first, entry.second);
   }
 
   return Status::OK();
