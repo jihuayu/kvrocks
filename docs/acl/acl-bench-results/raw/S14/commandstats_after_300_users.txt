@@ -1,0 +1,10 @@
+# CommandStats
+cmdstat_acl:calls=941,usec=182437,usec_per_call=193.87566418703506
+cmdstat_auth:calls=759,usec=4734,usec_per_call=6.237154150197629
+cmdstat_config:calls=2,usec=21,usec_per_call=10.5
+cmdstat_get:calls=101928,usec=2110881,usec_per_call=20.709530256651753
+cmdstat_hset:calls=20000,usec=2159938,usec_per_call=107.9969
+cmdstat_info:calls=12,usec=4353,usec_per_call=362.75
+cmdstat_mset:calls=20000,usec=16069196,usec_per_call=803.4598
+cmdstat_ping:calls=40001,usec=17945,usec_per_call=0.4486137846553836
+cmdstat_set:calls=201928,usec=78554165,usec_per_call=389.0206657818628

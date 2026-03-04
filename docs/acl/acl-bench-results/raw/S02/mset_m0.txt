@@ -1,0 +1,41 @@
+ERROR: failed to fetch CONFIG from 127.0.0.1:7771
+WARN: could not fetch server CONFIG
+MSET (10 keys): -nanMSET (10 keys): 4472.00MSET (10 keys): 4684.00MSET (10 keys): 4679.09MSET (10 keys): 4838.16MSET (10 keys): 4696.49MSET (10 keys): 4672.44MSET (10 keys): 4591.90MSET (10 keys): 4534.70MSET (10 keys): 4510.65MSET (10 keys): 4523.96MSET (10 keys): 4539.38MSET (10 keys): 4534.44MSET (10 keys): 4529.95MSET (10 keys): 4462.79MSET (10 keys): 4414.05MSET (10 keys): 4383.73MSET (10 keys): 4358.38MSET (10 keys): 4358.70====== MSET (10 keys) ======
+  20000 requests completed in 4.60 seconds
+  50 parallel clients
+  64 bytes payload
+  keep alive: 1
+  multi-thread: no
+
+0.00% <= 1.9 milliseconds
+0.01% <= 2 milliseconds
+0.01% <= 3 milliseconds
+0.06% <= 4 milliseconds
+0.12% <= 5 milliseconds
+0.37% <= 6 milliseconds
+1.74% <= 7 milliseconds
+6.70% <= 8 milliseconds
+17.54% <= 9 milliseconds
+32.18% <= 10 milliseconds
+49.01% <= 11 milliseconds
+64.25% <= 12 milliseconds
+77.28% <= 13 milliseconds
+86.44% <= 14 milliseconds
+91.96% <= 15 milliseconds
+95.65% <= 16 milliseconds
+97.53% <= 17 milliseconds
+98.52% <= 18 milliseconds
+98.89% <= 19 milliseconds
+99.17% <= 20 milliseconds
+99.48% <= 21 milliseconds
+99.67% <= 22 milliseconds
+99.75% <= 23 milliseconds
+99.88% <= 24 milliseconds
+99.90% <= 25 milliseconds
+99.94% <= 26 milliseconds
+99.96% <= 28 milliseconds
+99.98% <= 29 milliseconds
+100.00% <= 29 milliseconds
+4345.94 requests per second
+
+
