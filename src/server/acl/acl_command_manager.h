@@ -40,6 +40,8 @@ class AclCommandManager {
 
   size_t RegisterCommand(const std::string &name, CommandCategory category);
   std::optional<size_t> GetCommandBit(const std::string &name) const;
+  // Lock-free hot-path check using a pre-resolved bit index.
+  bool IsCommandAllowedByBit(const std::vector<uint64_t> &bitmap, size_t bit) const;
   StatusOr<std::vector<uint64_t>> BuildBitmapForCommands(const std::vector<std::string> &commands) const;
   StatusOr<std::vector<uint64_t>> BuildBitmapForCategory(const std::string &category) const;
   std::vector<std::string> CommandsFromBitmap(const std::vector<uint64_t> &bitmap) const;

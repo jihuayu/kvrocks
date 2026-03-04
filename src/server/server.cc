@@ -385,7 +385,6 @@ void Server::CleanupExitedSlaves() {
 std::vector<std::string> Server::RedactSensitiveTokens(const std::vector<std::string> &tokens) {
   if (tokens.empty()) return tokens;
   std::string cmd = util::ToLower(tokens[0]);
-  if (cmd != "auth" && cmd != "hello") return tokens;
 
   std::vector<std::string> redacted_tokens = tokens;
   if (cmd == "auth" && tokens.size() >= 2) {
@@ -407,6 +406,16 @@ std::vector<std::string> Server::RedactSensitiveTokens(const std::vector<std::st
           redacted_tokens[i + 1] = "(redacted)";
         }
         break;
+      }
+    }
+  } else if (cmd == "acl" && tokens.size() >= 3) {
+    std::string sub = util::ToLower(tokens[1]);
+    if (sub == "setuser") {
+      // ACL SETUSER <username> [rules...] - redact password-bearing modifiers (>pass and <pass)
+      for (size_t i = 3; i < redacted_tokens.size(); ++i) {
+        if (!redacted_tokens[i].empty() && (redacted_tokens[i][0] == '>' || redacted_tokens[i][0] == '<')) {
+          redacted_tokens[i] = std::string(1, redacted_tokens[i][0]) + "(redacted)";
+        }
       }
     }
   }
@@ -1721,18 +1730,19 @@ void Server::SlowlogPushEntryIfNeeded(const std::vector<std::string> *args, uint
   if (threshold < 0 || static_cast<int64_t>(duration) < threshold) return;
 
   auto entry = std::make_unique<SlowEntry>();
-  size_t argc = args->size() > kSlowLogMaxArgc ? kSlowLogMaxArgc : args->size();
+  const auto redacted_args = RedactSensitiveTokens(*args);
+  size_t argc = redacted_args.size() > kSlowLogMaxArgc ? kSlowLogMaxArgc : redacted_args.size();
   for (size_t i = 0; i < argc; i++) {
-    if (argc != args->size() && i == argc - 1) {
-      entry->args.emplace_back(fmt::format("... ({} more arguments)", args->size() - argc + 1));
+    if (argc != redacted_args.size() && i == argc - 1) {
+      entry->args.emplace_back(fmt::format("... ({} more arguments)", redacted_args.size() - argc + 1));
       break;
     }
 
-    if ((*args)[i].length() <= kSlowLogMaxString) {
-      entry->args.emplace_back((*args)[i]);
+    if (redacted_args[i].length() <= kSlowLogMaxString) {
+      entry->args.emplace_back(redacted_args[i]);
     } else {
-      entry->args.emplace_back(fmt::format("{}... ({} more bytes)", (*args)[i].substr(0, kSlowLogMaxString),
-                                           (*args)[i].length() - kSlowLogMaxString));
+      entry->args.emplace_back(fmt::format("{}... ({} more bytes)", redacted_args[i].substr(0, kSlowLogMaxString),
+                                           redacted_args[i].length() - kSlowLogMaxString));
     }
   }
 

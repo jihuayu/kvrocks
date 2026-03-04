@@ -25,12 +25,14 @@
 #include <rocksdb/types.h>
 #include <rocksdb/utilities/backup_engine.h>
 
+#include <atomic>
 #include <deque>
 #include <initializer_list>
 #include <iostream>
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -254,6 +256,47 @@ struct CommandAttributes {
         key_range_{-2, 0, 0},
         key_range_vec_gen_(std::move(key_range)) {}
 
+  // Explicit copy/move constructors to handle the non-copyable atomic cache field.
+  CommandAttributes(const CommandAttributes &other)
+      : name(other.name),
+        arity(other.arity),
+        category(other.category),
+        factory(other.factory),
+        flags_(other.flags_),
+        flag_gen_(other.flag_gen_),
+        key_range_(other.key_range_),
+        key_range_gen_(other.key_range_gen_),
+        key_range_vec_gen_(other.key_range_vec_gen_),
+        acl_bit_(-2) {}
+
+  CommandAttributes(CommandAttributes &&other) noexcept
+      : name(std::move(other.name)),
+        arity(other.arity),
+        category(other.category),
+        factory(std::move(other.factory)),
+        flags_(other.flags_),
+        flag_gen_(std::move(other.flag_gen_)),
+        key_range_(other.key_range_),
+        key_range_gen_(std::move(other.key_range_gen_)),
+        key_range_vec_gen_(std::move(other.key_range_vec_gen_)),
+        acl_bit_(-2) {}
+
+  CommandAttributes &operator=(const CommandAttributes &other) {
+    if (this != &other) {
+      name = other.name;
+      arity = other.arity;
+      category = other.category;
+      factory = other.factory;
+      flags_ = other.flags_;
+      flag_gen_ = other.flag_gen_;
+      key_range_ = other.key_range_;
+      key_range_gen_ = other.key_range_gen_;
+      key_range_vec_gen_ = other.key_range_vec_gen_;
+      acl_bit_.store(-2, std::memory_order_relaxed);
+    }
+    return *this;
+  }
+
   // command name
   std::string name;
 
@@ -339,6 +382,15 @@ struct CommandAttributes {
 
   // if key_range.first_key == -2, key_range_vec_gen is used instead
   CommandKeyRangeVecGen key_range_vec_gen_;
+
+  // Cached ACL command bit index. Sentinel values: -2 = not yet resolved, -1 = command unknown to ACL manager.
+  // Set lazily after AclCommandManager is sealed to avoid map + lock on every ACL check.
+  mutable std::atomic<int64_t> acl_bit_{-2};
+
+ public:
+  // Returns the cached ACL bit index for this command, or std::nullopt if not found.
+  // Thread-safe: resolved once and then read lock-free.
+  std::optional<size_t> GetOrResolveAclBit() const;
 };
 
 using CommandMap = std::map<std::string, const CommandAttributes *>;

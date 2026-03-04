@@ -167,4 +167,15 @@ Status CommandTable::ParseSlotRanges(const std::string &slots_str, std::vector<S
   return Status::OK();
 }
 
+std::optional<size_t> CommandAttributes::GetOrResolveAclBit() const {
+  int64_t cached = acl_bit_.load(std::memory_order_relaxed);
+  if (cached != -2) {
+    return cached >= 0 ? std::optional<size_t>(static_cast<size_t>(cached)) : std::nullopt;
+  }
+  auto bit = AclCommandManager::Instance().GetCommandBit(name);
+  int64_t resolved = bit.has_value() ? static_cast<int64_t>(bit.value()) : -1;
+  acl_bit_.store(resolved, std::memory_order_relaxed);
+  return bit;
+}
+
 }  // namespace redis

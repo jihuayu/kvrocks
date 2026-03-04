@@ -59,7 +59,7 @@ class Acl {
   std::optional<std::string> GetUsernameByIndex(size_t index) const;
 
   Status HandleSetUser(Namespace *ns_mgr, const std::string &username, const std::vector<std::string> &modifiers,
-                       std::string *output);
+                       std::string *output, bool strict_namespace = true);
   Status HandleGetUser(Connection *conn, const std::string &username, std::string *output);
   static Status HandleWhoAmI(Connection *conn, std::string *output);
   Status HandleUsers(Connection *conn, std::string *output) const;

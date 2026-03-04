@@ -239,6 +239,8 @@ Config::Config() {
       {"resp3-enabled", false, new YesNoField(&resp3_enabled, true)},
       {"acl-preview-enabled", false, new YesNoField(&acl_preview_enabled, false)},
       {"aclfile", false, new StringField(&acl_filename, "")},
+      {"acl-namespace-strict", false, new YesNoField(&acl_namespace_strict, true)},
+      {"acl-require-cluster-all-nodes", false, new YesNoField(&acl_require_cluster_all_nodes, false)},
       {"repl-namespace-enabled", false, new YesNoField(&repl_namespace_enabled, false)},
       {"proto-max-bulk-len", false,
        new IntWithUnitField<uint64_t>(&proto_max_bulk_len, std::to_string(512 * MiB), 1 * MiB, UINT64_MAX)},
