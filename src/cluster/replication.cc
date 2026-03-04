@@ -1192,6 +1192,8 @@ Status ReplicationThread::parseWriteBatch(const rocksdb::WriteBatch &write_batch
         if (!s.IsOK()) {
           return s.Prefixed("failed to remove replicated ACL user");
         }
+        int64_t killed = 0;
+        srv_->KillClientByAclUser(&killed, username, false, nullptr);
       }
       break;
     }
