@@ -143,6 +143,15 @@ func runCli(t *testing.T, srv *util.KvrocksServer, in io.Reader, args ...string)
 	}
 }
 
+func cliSupportsOption(option string) bool {
+	c := exec.Command(util.CLIPath(), "--help")
+	b, err := c.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return bytes.Contains(b, []byte(option))
+}
+
 func TestRedisCli(t *testing.T) {
 	srv := util.StartServer(t, map[string]string{})
 	defer srv.Close()
@@ -150,6 +159,7 @@ func TestRedisCli(t *testing.T) {
 	ctx := context.Background()
 	rdb := srv.NewClient()
 	defer func() { require.NoError(t, rdb.Close()) }()
+	supportsQuotedInput := cliSupportsOption("--quoted-input")
 
 	require.NoError(t, os.Setenv("TERM", "dumb"))
 	defer func() { require.NoError(t, os.Unsetenv("TERM")) }()
@@ -290,11 +300,17 @@ func TestRedisCli(t *testing.T) {
 		})
 
 		t.Run("Quoted input arguments", func(t *testing.T) {
+			if !supportsQuotedInput {
+				t.Skip("redis-cli does not support --quoted-input")
+			}
 			require.NoError(t, rdb.Set(ctx, "\x00\x00", "value", 0).Err())
 			require.Equal(t, "value", runCli(t, srv, nil, "--quoted-input", "get", `"\x00\x00"`).Success())
 		})
 
 		t.Run("No accidental unquoting of input arguments", func(t *testing.T) {
+			if !supportsQuotedInput {
+				t.Skip("redis-cli does not support --quoted-input")
+			}
 			require.Equal(t, "OK", runCli(t, srv, nil, "--quoted-input", "set", `"\x41\x41"`, "quoted-val").Success())
 			require.Equal(t, "OK", runCli(t, srv, nil, "set", `"\x41\x41"`, "unquoted-val").Success())
 			require.Equal(t, "quoted-val", rdb.Get(ctx, "AA").Val())
@@ -302,6 +318,9 @@ func TestRedisCli(t *testing.T) {
 		})
 
 		t.Run("Invalid quoted input arguments", func(t *testing.T) {
+			if !supportsQuotedInput {
+				t.Skip("redis-cli does not support --quoted-input")
+			}
 			runCli(t, srv, nil, "--quoted-input", "set", `"Unterminated`).Failed()
 			// a single arg that unquotes to two arguments is also not expected
 			runCli(t, srv, nil, "--quoted-input", "set", `"arg1" "arg2"`).Failed()

@@ -79,7 +79,7 @@ size_t AclCommandManager::RegisterCommand(const std::string &name, [[maybe_unuse
   }
 
   if (sealed_.load(std::memory_order_acquire)) {
-    fatal("Attempt to register ACL command `{}` after manager sealed.", name);
+    FATAL("Attempt to register ACL command `{}` after manager sealed.", name);
   }
 
   auto bit = next_bit_++;
