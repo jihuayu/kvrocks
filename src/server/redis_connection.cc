@@ -338,38 +338,65 @@ bool SelectorAllowsChannels(const redis::AclSelector &selector, const std::strin
 }  // namespace
 
 Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *attributes,
-                                          const std::vector<std::string> &cmd_tokens, uint64_t cmd_flags) {
+                                          const std::vector<std::string> &cmd_tokens, uint64_t cmd_flags,
+                                          AclDenyReason *deny_reason_out) {
   if (!acl_enforced_) {
+    if (deny_reason_out) *deny_reason_out = AclDenyReason::None;
     return Status::OK();
   }
 
   auto cached_user = acl->GetCachedUserByIndex(acl_user_index_);
   if (!cached_user) {
     ClearAclProfile();
+    if (deny_reason_out) *deny_reason_out = AclDenyReason::Command;
     return {Status::RedisNoPerm, "ACL user context is not available"};
   }
 
   acl_user_ = std::move(cached_user);
 
   if (!acl_user_->enabled) {
+    if (deny_reason_out) *deny_reason_out = AclDenyReason::Command;
     return {Status::RedisNoPerm, "ACL user is disabled"};
   }
 
   const auto command = util::ToLower(attributes->name);
+
+  // Determine the most specific deny reason across all selectors.
+  // Priority: channel > key > command (higher specificity wins).
+  bool any_key_denied = false;
+  bool any_channel_denied = false;
+
   for (const auto &selector : acl_user_->allowed_commands) {
     if (!SelectorAllowsCommand(selector, command)) {
       continue;
     }
     if (!SelectorAllowsKeys(selector, attributes, cmd_tokens, cmd_flags)) {
+      any_key_denied = true;
       continue;
     }
     if (!SelectorAllowsChannels(selector, command, cmd_tokens)) {
+      any_channel_denied = true;
       continue;
     }
+    if (deny_reason_out) *deny_reason_out = AclDenyReason::None;
     return Status::OK();
   }
 
-  return {Status::RedisNoPerm, fmt::format("ACL user is not allowed to run `{}`", command)};
+  AclDenyReason reason;
+  std::string error_msg;
+  if (any_channel_denied) {
+    reason = AclDenyReason::Channel;
+    error_msg = fmt::format("ACL user is not allowed to access a channel while executing `{}`", command);
+  } else if (any_key_denied) {
+    reason = AclDenyReason::Key;
+    error_msg = fmt::format("ACL user is not allowed to access a key while executing `{}`", command);
+  } else {
+    reason = AclDenyReason::Command;
+    error_msg = fmt::format("ACL user is not allowed to run `{}`", command);
+  }
+
+  if (deny_reason_out) *deny_reason_out = reason;
+  return {Status::RedisNoPerm, error_msg};
 }
 
 void Connection::SubscribeChannel(const std::string &channel) {
@@ -664,12 +691,39 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
     }
 
     if (config->acl_preview_enabled && !IsAdmin() && HasAclProfile()) {
-      auto acl_status = CheckAclCommandAllowed(srv_->GetAcl(), attributes, cmd_tokens, cmd_flags);
+      AclDenyReason deny_reason = AclDenyReason::None;
+      auto acl_status = CheckAclCommandAllowed(srv_->GetAcl(), attributes, cmd_tokens, cmd_flags, &deny_reason);
       if (!acl_status.IsOK()) {
         // Keep ASKING as one-shot for requests rejected by ACL.
         if (IsFlagEnabled(kAsking)) {
           DisableFlag(kAsking);
         }
+
+        // Update stats
+        switch (deny_reason) {
+          case AclDenyReason::Key:
+            srv_->stats.IncrAclDeniedKey();
+            break;
+          case AclDenyReason::Channel:
+            srv_->stats.IncrAclDeniedChannel();
+            break;
+          default:
+            srv_->stats.IncrAclDeniedCmd();
+            break;
+        }
+
+        // Record to ACL log
+        std::string context = is_multi_exec ? "multi" : (in_script_ ? "lua" : "toplevel");
+        std::string object;
+        if (deny_reason == AclDenyReason::Key && cmd_tokens.size() > 1) {
+          object = cmd_tokens[1];
+        } else if (deny_reason == AclDenyReason::Channel && cmd_tokens.size() > 1) {
+          object = cmd_tokens[1];
+        } else {
+          object = util::ToLower(attributes->name);
+        }
+        srv_->GetAcl()->GetAclLog().AddEntry(deny_reason, context, object, GetAclUsername(), ToString());
+
         Reply(redis::Error(acl_status));
         continue;
       }

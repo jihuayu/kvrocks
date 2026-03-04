@@ -1012,3 +1012,281 @@ func TestACLDelUserDisconnectsUserConnections(t *testing.T) {
 		return err != nil
 	}, 5*time.Second, 50*time.Millisecond)
 }
+
+// parseAclLogEntry turns a flat RESP2 array (or RESP3 map) ACL LOG entry into a string map.
+func parseAclLogEntry(t *testing.T, entry interface{}) map[string]string {
+	t.Helper()
+	result := make(map[string]string)
+
+	switch v := entry.(type) {
+	case map[interface{}]interface{}:
+		for k, val := range v {
+			result[fmt.Sprintf("%v", k)] = fmt.Sprintf("%v", val)
+		}
+	case []interface{}:
+		for i := 0; i+1 < len(v); i += 2 {
+			result[fmt.Sprintf("%v", v[i])] = fmt.Sprintf("%v", v[i+1])
+		}
+	default:
+		t.Fatalf("unexpected ACL LOG entry type: %T", entry)
+	}
+	return result
+}
+
+func TestACLLog(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	t.Run("initially empty", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "LOG", "RESET").Err())
+		res, err := admin.Do(ctx, "ACL", "LOG").Result()
+		require.NoError(t, err)
+		entries, ok := res.([]interface{})
+		require.True(t, ok)
+		require.Empty(t, entries)
+	})
+
+	t.Run("records command denial", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "LOG", "RESET").Err())
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "logtest", "on", ">p", "+get", "~*").Err())
+
+		userClient := srv.NewClientWithOption(&redis.Options{Username: "logtest", Password: "p", PoolSize: 1})
+		defer func() { require.NoError(t, userClient.Close()) }()
+		_ = userClient.Set(ctx, "k", "v", 0).Err() // SET not allowed
+
+		res, err := admin.Do(ctx, "ACL", "LOG").Result()
+		require.NoError(t, err)
+		entries, ok := res.([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, entries)
+
+		entry := parseAclLogEntry(t, entries[0])
+		require.Equal(t, "command", entry["reason"])
+		require.Equal(t, "set", entry["object"])
+		require.Equal(t, "logtest", entry["username"])
+		require.Equal(t, "toplevel", entry["context"])
+		require.NotEmpty(t, entry["client-info"])
+		require.NotEmpty(t, entry["entry-id"])
+		require.NotEmpty(t, entry["timestamp-created"])
+		require.NotEmpty(t, entry["timestamp-last-updated"])
+
+		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "logtest").Err())
+	})
+
+	t.Run("RESET clears log", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "logreset", "on", ">p", "+get", "~*").Err())
+		userClient := srv.NewClientWithOption(&redis.Options{Username: "logreset", Password: "p", PoolSize: 1})
+		defer func() { require.NoError(t, userClient.Close()) }()
+		_ = userClient.Set(ctx, "k", "v", 0).Err()
+
+		res, err := admin.Do(ctx, "ACL", "LOG", "RESET").Result()
+		require.NoError(t, err)
+		require.Equal(t, "OK", res)
+
+		res, err = admin.Do(ctx, "ACL", "LOG").Result()
+		require.NoError(t, err)
+		entries, ok := res.([]interface{})
+		require.True(t, ok)
+		require.Empty(t, entries)
+
+		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "logreset").Err())
+	})
+
+	t.Run("count parameter limits results", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "LOG", "RESET").Err())
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "logcount", "on", ">p", "+get", "~*").Err())
+		userClient := srv.NewClientWithOption(&redis.Options{Username: "logcount", Password: "p", PoolSize: 1})
+		defer func() { require.NoError(t, userClient.Close()) }()
+
+		// Trigger denials for 3 different commands
+		for _, cmd := range []string{"set", "del", "mset"} {
+			_ = userClient.Do(ctx, cmd, "k", "v").Err()
+		}
+
+		res, err := admin.Do(ctx, "ACL", "LOG", "2").Result()
+		require.NoError(t, err)
+		entries, ok := res.([]interface{})
+		require.True(t, ok)
+		require.LessOrEqual(t, len(entries), 2)
+
+		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "logcount").Err())
+	})
+
+	t.Run("aggregates repeated denials", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "LOG", "RESET").Err())
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "logagg", "on", ">p", "+get", "~*").Err())
+		userClient := srv.NewClientWithOption(&redis.Options{Username: "logagg", Password: "p", PoolSize: 1})
+		defer func() { require.NoError(t, userClient.Close()) }()
+
+		// Same command denied multiple times should aggregate
+		for i := 0; i < 3; i++ {
+			_ = userClient.Set(ctx, "k", "v", 0).Err()
+		}
+
+		res, err := admin.Do(ctx, "ACL", "LOG").Result()
+		require.NoError(t, err)
+		entries, ok := res.([]interface{})
+		require.True(t, ok)
+		require.Len(t, entries, 1)
+		entry := parseAclLogEntry(t, entries[0])
+		count, err2 := fmt.Sscanf(entry["count"], "%d", new(int))
+		require.NoError(t, err2)
+		require.Equal(t, 1, count)
+		require.GreaterOrEqual(t, entry["count"], "3")
+
+		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "logagg").Err())
+	})
+
+	t.Run("records auth failure", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "LOG", "RESET").Err())
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "logauth", "on", ">correct", "+get", "~*").Err())
+
+		badConn := srv.NewClientWithOption(&redis.Options{Username: "logauth", Password: "wrong", PoolSize: 1})
+		defer func() { require.NoError(t, badConn.Close()) }()
+		_ = badConn.Ping(ctx).Err()
+
+		res, err := admin.Do(ctx, "ACL", "LOG").Result()
+		require.NoError(t, err)
+		entries, ok := res.([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, entries)
+		entry := parseAclLogEntry(t, entries[0])
+		require.Equal(t, "auth", entry["reason"])
+		require.Equal(t, "logauth", entry["username"])
+
+		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "logauth").Err())
+	})
+}
+
+func TestACLLoadSave(t *testing.T) {
+	aclFile := t.TempDir() + "/test.acl"
+	srv := util.StartServer(t, map[string]string{
+		"acl-preview-enabled": "yes",
+		"aclfile":             aclFile,
+	})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	t.Run("SAVE writes current ACL users", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "savetest", "on", ">p", "+get", "~*").Err())
+
+		res, err := admin.Do(ctx, "ACL", "SAVE").Result()
+		require.NoError(t, err)
+		require.Equal(t, "OK", res)
+	})
+
+	t.Run("LOAD reads ACL file", func(t *testing.T) {
+		// Delete user in server
+		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "savetest").Err())
+
+		// Verify gone: GETUSER of a non-existent user returns nil array (redis.Nil from go-redis)
+		err := admin.Do(ctx, "ACL", "GETUSER", "savetest").Err()
+		require.ErrorIs(t, err, redis.Nil)
+
+		// Reload from file
+		res, err := admin.Do(ctx, "ACL", "LOAD").Result()
+		require.NoError(t, err)
+		require.Equal(t, "OK", res)
+
+		// Should be back
+		res, err = admin.Do(ctx, "ACL", "GETUSER", "savetest").Result()
+		require.NoError(t, err)
+		require.NotNil(t, res)
+	})
+}
+
+func TestACLLoadSaveNoFile(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	t.Run("LOAD returns error when no aclfile configured", func(t *testing.T) {
+		err := admin.Do(ctx, "ACL", "LOAD").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not configured to use an ACL file")
+	})
+
+	t.Run("SAVE returns error when no aclfile configured", func(t *testing.T) {
+		err := admin.Do(ctx, "ACL", "SAVE").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not configured to use an ACL file")
+	})
+}
+
+func TestACLInfoStats(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	t.Run("INFO ACL section exists", func(t *testing.T) {
+		info, err := admin.Info(ctx, "acl").Result()
+		require.NoError(t, err)
+		require.Contains(t, info, "acl_access_denied_auth")
+		require.Contains(t, info, "acl_access_denied_cmd")
+		require.Contains(t, info, "acl_access_denied_key")
+		require.Contains(t, info, "acl_access_denied_channel")
+	})
+
+	t.Run("acl_access_denied_cmd increments on command denial", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "statstest", "on", ">p", "+get", "~*").Err())
+		userClient := srv.NewClientWithOption(&redis.Options{Username: "statstest", Password: "p", PoolSize: 1})
+		defer func() { require.NoError(t, userClient.Close()) }()
+
+		infoBefore, err := admin.Info(ctx, "acl").Result()
+		require.NoError(t, err)
+		var beforeCmd int
+		fmt.Sscanf(extractInfoValue(infoBefore, "acl_access_denied_cmd"), "%d", &beforeCmd)
+
+		_ = userClient.Set(ctx, "k", "v", 0).Err()
+
+		infoAfter, err := admin.Info(ctx, "acl").Result()
+		require.NoError(t, err)
+		var afterCmd int
+		fmt.Sscanf(extractInfoValue(infoAfter, "acl_access_denied_cmd"), "%d", &afterCmd)
+		require.Greater(t, afterCmd, beforeCmd)
+
+		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "statstest").Err())
+	})
+}
+
+// extractInfoValue extracts a field value from INFO output string.
+func extractInfoValue(info, field string) string {
+	for _, line := range splitLines(info) {
+		if len(line) > len(field)+1 && line[:len(field)+1] == field+":" {
+			return line[len(field)+1:]
+		}
+	}
+	return ""
+}
+
+func splitLines(s string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			line := s[start:i]
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+			lines = append(lines, line)
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	return lines
+}

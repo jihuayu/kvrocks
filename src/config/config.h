@@ -180,6 +180,7 @@ struct Config {
   int redis_databases = 0;
   bool resp3_enabled = false;
   bool acl_preview_enabled = false;
+  std::string acl_filename;
   int log_retention_days;
 
   // load_tokens is used to buffer the tokens when loading,

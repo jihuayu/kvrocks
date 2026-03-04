@@ -238,6 +238,7 @@ Config::Config() {
       {"redis-databases", true, new IntField(&redis_databases, 0, 0, INT_MAX)},
       {"resp3-enabled", false, new YesNoField(&resp3_enabled, true)},
       {"acl-preview-enabled", false, new YesNoField(&acl_preview_enabled, false)},
+      {"aclfile", false, new StringField(&acl_filename, "")},
       {"repl-namespace-enabled", false, new YesNoField(&repl_namespace_enabled, false)},
       {"proto-max-bulk-len", false,
        new IntWithUnitField<uint64_t>(&proto_max_bulk_len, std::to_string(512 * MiB), 1 * MiB, UINT64_MAX)},

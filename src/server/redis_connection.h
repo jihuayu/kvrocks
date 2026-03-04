@@ -33,6 +33,7 @@
 #include "commands/commander.h"
 #include "event_util.h"
 #include "redis_request.h"
+#include "server/acl/acl_log.h"
 #include "server/redis_reply.h"
 
 class Worker;
@@ -187,8 +188,9 @@ class Connection : public EvbufCallbackBase<Connection> {
   const std::string &GetAclUsername() const { return acl_username_; }
   size_t GetAclUserIndex() const { return acl_user_index_; }
 
-  Status CheckAclCommandAllowed(Acl *acl, const CommandAttributes *attributes, const std::vector<std::string> &cmd_tokens,
-                                uint64_t cmd_flags);
+  Status CheckAclCommandAllowed(Acl *acl, const CommandAttributes *attributes,
+                                const std::vector<std::string> &cmd_tokens, uint64_t cmd_flags,
+                                AclDenyReason *deny_reason_out = nullptr);
 
   // Multi exec
   void SetInExec() { in_exec_ = true; }
