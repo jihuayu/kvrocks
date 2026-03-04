@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <ctime>
 #include <memory>
 #include <optional>
@@ -76,6 +77,12 @@ class CommandAuth : public Commander {
       case AuthResult::NO_REQUIRE_PASS:
         return {Status::RedisExecErr, "Client sent AUTH, but no password is set"};
       case AuthResult::INVALID_PASSWORD:
+        if (srv->GetConfig()->acl_preview_enabled) {
+          srv->stats.IncrAclDeniedAuth();
+          srv->GetAcl()->GetAclLog().AddEntry(redis::AclDenyReason::Auth, "toplevel",
+                                              has_username_ ? username_ : "default",
+                                              has_username_ ? username_ : "default", conn->ToString());
+        }
         return {Status::RedisExecErr, "Invalid password"};
       case AuthResult::IS_USER: {
         conn->BecomeUser();
@@ -1817,25 +1824,78 @@ class CommandAcl : public Commander {
       case Subcommand::kGenPass:
         *output = redis::BulkString(GenerateRandomHex(static_cast<size_t>((genpass_bits_ + 3) / 4)));
         return Status::OK();
-      case Subcommand::kLog:
+      case Subcommand::kLog: {
         if (log_reset_) {
+          acl->GetAclLog().Reset();
           *output = redis::RESP_OK;
         } else {
-          std::vector<std::string> empty_entries;
-          empty_entries.reserve(static_cast<size_t>(std::max(log_count_, 0)));
-          *output = conn->MultiBulkString(empty_entries);
+          auto entries = acl->GetAclLog().GetEntries(log_count_);
+          int64_t now_ms =
+              std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+                  .count();
+          std::string result = redis::MultiLen(static_cast<int64_t>(entries.size()));
+          for (const auto &entry : entries) {
+            double age_secs = static_cast<double>(now_ms - entry.timestamp_last_updated_ms) / 1000.0;
+            result += conn->MapOfBulkStrings({
+                "count",
+                std::to_string(entry.count),
+                "reason",
+                AclDenyReasonString(entry.reason),
+                "context",
+                entry.context,
+                "object",
+                entry.object,
+                "username",
+                entry.username,
+                "age",
+                fmt::format("{:.3f}", age_secs),
+                "client-info",
+                entry.client_info,
+                "entry-id",
+                std::to_string(entry.entry_id),
+                "timestamp-created",
+                std::to_string(entry.timestamp_created_ms),
+                "timestamp-last-updated",
+                std::to_string(entry.timestamp_last_updated_ms),
+            });
+          }
+          *output = result;
         }
         return Status::OK();
+      }
       case Subcommand::kDryRun:
         return acl->HandleDryRun(conn, username_, dryrun_command_tokens_, output);
       case Subcommand::kHelp:
         *output = conn->MultiBulkString(HelpEntries());
         return Status::OK();
-      case Subcommand::kLoad:
-      case Subcommand::kSave:
-        return {Status::RedisExecErr,
-                "This Redis instance is not configured to use an ACL file. "
-                "Please set an ACL file before using ACL LOAD or ACL SAVE"};
+      case Subcommand::kLoad: {
+        const auto &aclfile = srv->GetConfig()->acl_filename;
+        if (aclfile.empty()) {
+          return {Status::RedisExecErr,
+                  "This Redis instance is not configured to use an ACL file. "
+                  "Please set an ACL file before using ACL LOAD or ACL SAVE"};
+        }
+        auto s = acl->LoadAclFromFile(aclfile);
+        if (!s.IsOK()) {
+          return s;
+        }
+        *output = redis::RESP_OK;
+        return Status::OK();
+      }
+      case Subcommand::kSave: {
+        const auto &aclfile = srv->GetConfig()->acl_filename;
+        if (aclfile.empty()) {
+          return {Status::RedisExecErr,
+                  "This Redis instance is not configured to use an ACL file. "
+                  "Please set an ACL file before using ACL LOAD or ACL SAVE"};
+        }
+        auto s = acl->SaveAclToFile(aclfile);
+        if (!s.IsOK()) {
+          return s;
+        }
+        *output = redis::RESP_OK;
+        return Status::OK();
+      }
       case Subcommand::kUnknown:
         break;
     }

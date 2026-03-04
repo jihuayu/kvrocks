@@ -162,7 +162,7 @@ Status Server::Start() {
   }
 
   if (config_->acl_preview_enabled) {
-    warn("[server] ACL preview feature is incomplete; do not use in production.");
+    WARN("[server] ACL preview feature is incomplete; do not use in production.");
   }
 
   if (!config_->master_host.empty()) {
@@ -1466,6 +1466,15 @@ Server::InfoEntries Server::GetKeyspaceInfo(const std::string &ns) {
 // DB is closed and the pointer is invalid. Server may crash if we access DB during loading.
 // If you add new fields which access DB into INFO command output, make sure
 // this section can't be shown when loading(i.e. !is_loading_).
+Server::InfoEntries Server::GetAclInfo() {
+  InfoEntries entries;
+  entries.emplace_back("acl_access_denied_auth", stats.acl_access_denied_auth.load());
+  entries.emplace_back("acl_access_denied_cmd", stats.acl_access_denied_cmd.load());
+  entries.emplace_back("acl_access_denied_key", stats.acl_access_denied_key.load());
+  entries.emplace_back("acl_access_denied_channel", stats.acl_access_denied_channel.load());
+  return entries;
+}
+
 std::string Server::GetInfo(const std::string &ns, const std::vector<std::string> &sections) {
   std::vector<std::pair<std::string, std::function<InfoEntries(Server *)>>> info_funcs = {
       {"Server", &Server::GetServerInfo},   {"Clients", &Server::GetClientsInfo},
@@ -1473,7 +1482,7 @@ std::string Server::GetInfo(const std::string &ns, const std::vector<std::string
       {"Stats", &Server::GetStatsInfo},     {"Replication", &Server::GetReplicationInfo},
       {"CPU", &Server::GetCpuInfo},         {"CommandStats", &Server::GetCommandsStatsInfo},
       {"Cluster", &Server::GetClusterInfo}, {"Keyspace", [&ns](Server *srv) { return srv->GetKeyspaceInfo(ns); }},
-      {"RocksDB", &Server::GetRocksDBInfo},
+      {"RocksDB", &Server::GetRocksDBInfo}, {"ACL", &Server::GetAclInfo},
   };
 
   std::string info_str;

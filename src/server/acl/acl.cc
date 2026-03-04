@@ -22,8 +22,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstring>
 #include <exception>
+#include <fstream>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -33,6 +37,7 @@
 #include "commands/error_constants.h"
 #include "common/db_util.h"
 #include "common/string_util.h"
+#include "fmt/format.h"
 #include "server/namespace.h"
 #include "server/redis_connection.h"
 #include "server/redis_reply.h"
@@ -549,6 +554,107 @@ Status Acl::ApplyReplicatedDeletion(const std::string &username) {
   if (!user_manager_->DeleteUser(username)) {
     // User might not exist in cache, which is okay for replication
     return Status::OK();
+  }
+  return Status::OK();
+}
+
+Status Acl::LoadAclFromFile(const std::string &path) {
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    return {Status::NotOK, "Failed to open ACL file: " + path};
+  }
+
+  // Parse all lines first; abort on any error before making changes.
+  struct ParsedLine {
+    std::string username;
+    std::vector<std::string> modifiers;
+  };
+  std::vector<ParsedLine> parsed_lines;
+  std::string line;
+  int line_num = 0;
+  while (std::getline(file, line)) {
+    ++line_num;
+    // Strip trailing CR
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    // Skip blank lines and comments
+    size_t first_non_space = line.find_first_not_of(" \t");
+    if (first_non_space == std::string::npos || line[first_non_space] == '#') {
+      continue;
+    }
+    auto tokens_or = util::SplitArguments(line);
+    if (!tokens_or.IsOK()) {
+      return tokens_or.ToStatus().Prefixed(fmt::format("ACL file line {}", line_num));
+    }
+    auto &tokens = tokens_or.GetValue();
+    if (tokens.empty()) continue;
+    if (util::ToLower(tokens[0]) != "user" || tokens.size() < 2) {
+      return {Status::NotOK,
+              fmt::format("ACL file line {}: expected 'user <username> [rules...]', got '{}'", line_num, line)};
+    }
+    ParsedLine pl;
+    pl.username = tokens[1];
+    pl.modifiers.assign(tokens.begin() + 2, tokens.end());
+    parsed_lines.emplace_back(std::move(pl));
+  }
+
+  if (file.bad()) {
+    return {Status::NotOK, "Error reading ACL file: " + path};
+  }
+
+  // Collect usernames present in file
+  std::set<std::string> file_usernames;
+  for (const auto &pl : parsed_lines) {
+    file_usernames.insert(pl.username);
+  }
+
+  // Delete users present in storage but not in file (except "default" stays unless file has it)
+  auto existing = ListUsers();
+  for (const auto &existing_name : existing) {
+    if (file_usernames.find(existing_name) == file_usernames.end()) {
+      auto s = Del(existing_name);
+      (void)s;  // best-effort; continue even on error
+    }
+  }
+
+  // Apply all users from file
+  std::string dummy_output;
+  for (const auto &pl : parsed_lines) {
+    auto s = HandleSetUser(nullptr, pl.username, pl.modifiers, &dummy_output);
+    if (!s.IsOK()) {
+      return s.Prefixed(fmt::format("ACL file user '{}'", pl.username));
+    }
+  }
+
+  return Status::OK();
+}
+
+Status Acl::SaveAclToFile(const std::string &path) const {
+  // Write to a temporary file then rename for atomicity.
+  std::string tmp_path = path + ".tmp";
+  std::ofstream file(tmp_path);
+  if (!file.is_open()) {
+    return {Status::NotOK, "Failed to open ACL temp file for writing: " + tmp_path};
+  }
+
+  auto names = ListUsers();
+  for (const auto &name : names) {
+    auto user = user_manager_->GetUserByUserName(name);
+    if (!user) continue;
+    file << BuildAclListEntry(name, *user) << "\n";
+    if (!file) {
+      return {Status::NotOK, "Error writing ACL file"};
+    }
+  }
+  file.close();
+  if (!file) {
+    return {Status::NotOK, "Error flushing ACL file"};
+  }
+
+  if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+    return {Status::NotOK,
+            fmt::format("Failed to rename ACL temp file '{}' to '{}': {}", tmp_path, path, strerror(errno))};
   }
   return Status::OK();
 }

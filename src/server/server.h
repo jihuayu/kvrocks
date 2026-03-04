@@ -279,6 +279,7 @@ class Server {
   InfoEntries GetClusterInfo();
   InfoEntries GetPersistenceInfo();
   InfoEntries GetCpuInfo();
+  InfoEntries GetAclInfo();
   InfoEntries GetKeyspaceInfo(const std::string &ns);
 
   std::string GetInfo(const std::string &ns, const std::vector<std::string> &sections);

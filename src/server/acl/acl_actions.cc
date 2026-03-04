@@ -247,7 +247,8 @@ Status ApplySelectorAction(AclUser &user, const SelectorAction &action) {
     for (const auto &nested_action : nested_actions) {
       if (std::holds_alternative<EnableAction>(nested_action) || std::holds_alternative<DisableAction>(nested_action) ||
           std::holds_alternative<ResetUserAction>(nested_action) ||
-          std::holds_alternative<ResetPassAction>(nested_action) || std::holds_alternative<NoPassAction>(nested_action) ||
+          std::holds_alternative<ResetPassAction>(nested_action) ||
+          std::holds_alternative<NoPassAction>(nested_action) ||
           std::holds_alternative<PasswordAction>(nested_action) ||
           std::holds_alternative<ClearSelectorsAction>(nested_action) ||
           std::holds_alternative<SanitizePayloadAction>(nested_action) ||
@@ -516,15 +517,15 @@ Status ApplySetUserAction(AclUser &user, const SetUserAction &action) {
                    return Status::OK();
                  },
                  [&](const ResetPassAction &) -> Status {
-                    user.passwords.clear();
-                    user.nopass = false;
-                    return Status::OK();
-                  },
+                   user.passwords.clear();
+                   user.nopass = false;
+                   return Status::OK();
+                 },
                  [&](const NoPassAction &) -> Status {
-                    user.passwords.clear();
-                    user.nopass = true;
-                    return Status::OK();
-                  },
+                   user.passwords.clear();
+                   user.nopass = true;
+                   return Status::OK();
+                 },
                  [&](const SanitizePayloadAction &sanitize) -> Status {
                    user.sanitize_payload = sanitize.enabled;
                    return Status::OK();

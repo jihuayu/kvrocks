@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "acl_command_manager.h"
+#include "acl_log.h"
 #include "acl_user.h"
 #include "common/status.h"
 #include "storage/storage.h"
@@ -73,9 +74,17 @@ class Acl {
   Status ApplyReplicatedUpdate(const std::string &username, const std::string &value);
   Status ApplyReplicatedDeletion(const std::string &username);
 
+  AclLog &GetAclLog() { return acl_log_; }
+
+  // Load ACL users from an ACL file (one "user ..." line per line).
+  Status LoadAclFromFile(const std::string &path);
+  // Save all ACL users to an ACL file in "ACL LIST" format.
+  Status SaveAclToFile(const std::string &path) const;
+
  private:
   engine::Storage *storage_;
   std::unique_ptr<AclUserManager> user_manager_;
+  AclLog acl_log_;
 };
 
 }  // namespace redis

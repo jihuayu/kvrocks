@@ -76,6 +76,11 @@ class Stats {
   std::atomic<uint64_t> fullsync_count = {0};
   std::atomic<uint64_t> psync_err_count = {0};
   std::atomic<uint64_t> psync_ok_count = {0};
+
+  std::atomic<uint64_t> acl_access_denied_auth = {0};
+  std::atomic<uint64_t> acl_access_denied_cmd = {0};
+  std::atomic<uint64_t> acl_access_denied_key = {0};
+  std::atomic<uint64_t> acl_access_denied_channel = {0};
   std::map<std::string, CommandStat> commands_stats;
 
   using BucketBoundaries = std::vector<double>;
@@ -91,6 +96,10 @@ class Stats {
   void IncrFullSyncCount() { fullsync_count.fetch_add(1, std::memory_order_relaxed); }
   void IncrPSyncErrCount() { psync_err_count.fetch_add(1, std::memory_order_relaxed); }
   void IncrPSyncOKCount() { psync_ok_count.fetch_add(1, std::memory_order_relaxed); }
+  void IncrAclDeniedAuth() { acl_access_denied_auth.fetch_add(1, std::memory_order_relaxed); }
+  void IncrAclDeniedCmd() { acl_access_denied_cmd.fetch_add(1, std::memory_order_relaxed); }
+  void IncrAclDeniedKey() { acl_access_denied_key.fetch_add(1, std::memory_order_relaxed); }
+  void IncrAclDeniedChannel() { acl_access_denied_channel.fetch_add(1, std::memory_order_relaxed); }
   static int64_t GetMemoryRSS();
   void TrackInstantaneousMetric(int metric, uint64_t current_reading);
   uint64_t GetInstantaneousMetric(int metric) const;
