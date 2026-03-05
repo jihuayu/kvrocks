@@ -54,13 +54,40 @@ constexpr uint32_t kAclSelectorAllCommands = 1 << 3;
 
 // Key pattern with permissions (%R~pattern, %W~pattern, ~pattern)
 struct AclKeyPattern {
+  enum class MatchMode : uint8_t { kExact = 0, kPrefix = 1, kGlob = 2 };
+
   std::string pattern;
   uint32_t flags;  // kAclKeyRead, kAclKeyWrite, or kAclKeyAll
+  MatchMode match_mode = MatchMode::kExact;
+  std::string prefix;
 
-  AclKeyPattern() : flags(kAclKeyAll) {}
-  AclKeyPattern(std::string p, uint32_t f) : pattern(std::move(p)), flags(f) {}
+  AclKeyPattern() : flags(kAclKeyAll) { CompileMatchMode(); }
+  AclKeyPattern(std::string p, uint32_t f) : pattern(std::move(p)), flags(f) { CompileMatchMode(); }
 
   bool operator==(const AclKeyPattern &other) const { return pattern == other.pattern && flags == other.flags; }
+
+ private:
+  void CompileMatchMode() {
+    prefix.clear();
+    if (pattern.empty()) {
+      match_mode = MatchMode::kExact;
+      return;
+    }
+
+    const auto first_meta = pattern.find_first_of("*?[]\\");
+    if (first_meta == std::string::npos) {
+      match_mode = MatchMode::kExact;
+      return;
+    }
+
+    if (pattern.back() == '*' && first_meta == pattern.size() - 1) {
+      match_mode = MatchMode::kPrefix;
+      prefix = pattern.substr(0, pattern.size() - 1);
+      return;
+    }
+
+    match_mode = MatchMode::kGlob;
+  }
 };
 
 class AclSelector {

@@ -104,6 +104,25 @@ Build with debug mode, run:
 $ ./x.py build -DCMAKE_BUILD_TYPE=Debug
 ```
 
+### Faster development builds
+
+To speed up iterative builds during development, prefer:
+
+```shell
+# Fast preset: Debug, no LTO, no static libstdc++, uses Ninja and ccache when available.
+$ ./x.py build --dev -j "$(nproc)"
+```
+
+Or tune it manually:
+
+```shell
+# Use a fast linker (mold/lld) and compiler cache.
+$ ./x.py build --ninja --ccache --linker mold -DCMAKE_BUILD_TYPE=Debug -DENABLE_LTO=OFF -DENABLE_STATIC_LIBSTDCXX=OFF -j "$(nproc)"
+
+# Unity build can speed up full rebuilds (optional).
+$ ./x.py build --dev --unity --unity-batch-size 12 -j "$(nproc)"
+```
+
 ### Running Kvrocks
 
 ```shell

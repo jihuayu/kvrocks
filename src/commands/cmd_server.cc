@@ -24,10 +24,10 @@
 #include <cctype>
 #include <chrono>
 #include <ctime>
-#include <set>
 #include <memory>
 #include <optional>
 #include <random>
+#include <set>
 #include <string_view>
 
 #include "command_parser.h"
@@ -53,7 +53,7 @@ namespace {
 
 // Returns true if channel permissions were tightened (new user allows fewer channels than old).
 bool IsChannelScopeTightened(const std::shared_ptr<const redis::AclUser> &old_user,
-                              const std::shared_ptr<const redis::AclUser> &new_user) {
+                             const std::shared_ptr<const redis::AclUser> &new_user) {
   if (!old_user || !new_user) return false;
   // Check if old user had allchannels and new user doesn't.
   bool old_allchannels = std::any_of(old_user->allowed_commands.begin(), old_user->allowed_commands.end(),
@@ -69,8 +69,8 @@ bool IsChannelScopeTightened(const std::shared_ptr<const redis::AclUser> &old_us
   for (const auto &sel : new_user->allowed_commands) {
     for (const auto &ch : sel.channels) new_channels.insert(ch);
   }
-  return old_channels != new_channels && !std::includes(new_channels.begin(), new_channels.end(),
-                                                         old_channels.begin(), old_channels.end());
+  return old_channels != new_channels &&
+         !std::includes(new_channels.begin(), new_channels.end(), old_channels.begin(), old_channels.end());
 }
 
 }  // namespace
@@ -121,7 +121,7 @@ class CommandAuth : public Commander {
               profile_name = username_or.value();
             }
           }
-          conn->SetAclProfile(profile_name, acl_user_index, acl_user);
+          conn->SetAclProfile(profile_name, acl_user_index, acl_user, srv->GetAcl()->GetVersion());
         }
         break;
       }
@@ -983,7 +983,7 @@ class CommandHello final : public Commander {
                   profile_name = username_or.value();
                 }
               }
-              conn->SetAclProfile(profile_name, acl_user_index, acl_user);
+              conn->SetAclProfile(profile_name, acl_user_index, acl_user, srv->GetAcl()->GetVersion());
             }
             break;
           }

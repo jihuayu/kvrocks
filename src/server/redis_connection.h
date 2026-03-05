@@ -182,7 +182,8 @@ class Connection : public EvbufCallbackBase<Connection> {
   bool CanMigrate() const;
   static constexpr size_t kInvalidAclUserIndex = std::numeric_limits<size_t>::max();
 
-  void SetAclProfile(const std::string &username, size_t user_index, std::shared_ptr<const AclUser> user);
+  void SetAclProfile(const std::string &username, size_t user_index, std::shared_ptr<const AclUser> user,
+                     uint64_t acl_version);
   void ClearAclProfile();
   bool HasAclProfile() const { return acl_enforced_; }
   const std::string &GetAclUsername() const { return acl_username_; }
@@ -212,6 +213,7 @@ class Connection : public EvbufCallbackBase<Connection> {
   ReplyMode GetReplyMode() const { return reply_mode_; }
 
  private:
+  Status DeauthenticateAndRequireAuth(AclDenyReason *deny_reason_out);
   uint64_t id_ = 0;
   std::atomic<int> flags_ = 0;
   std::string ns_;

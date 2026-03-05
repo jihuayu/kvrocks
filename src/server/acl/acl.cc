@@ -552,11 +552,11 @@ Status Acl::HandleDryRun(Connection *conn, const std::string &username, const st
   const size_t previous_user_index = conn->GetAclUserIndex();
   auto previous_user = had_acl_profile ? GetCachedUserByIndex(previous_user_index) : nullptr;
 
-  conn->SetAclProfile(username, *user_index, user);
+  conn->SetAclProfile(username, *user_index, user, GetVersion());
   auto acl_status = conn->CheckAclCommandAllowed(
       this, attributes, command_tokens, attributes->GenerateFlags(command_tokens, *conn->GetServer()->GetConfig()));
   if (had_acl_profile && previous_user) {
-    conn->SetAclProfile(previous_username, previous_user_index, previous_user);
+    conn->SetAclProfile(previous_username, previous_user_index, previous_user, GetVersion());
   } else {
     conn->ClearAclProfile();
   }

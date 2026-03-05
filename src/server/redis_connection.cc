@@ -264,11 +264,12 @@ bool Connection::CanMigrate() const {
          && subscribe_channels_.empty() && subscribe_patterns_.empty();  // not subscribing any channel
 }
 
-void Connection::SetAclProfile(const std::string &username, size_t user_index, std::shared_ptr<const AclUser> user) {
+void Connection::SetAclProfile(const std::string &username, size_t user_index, std::shared_ptr<const AclUser> user,
+                               uint64_t acl_version) {
   acl_enforced_ = true;
   acl_username_ = username;
   acl_user_index_ = user_index;
-  acl_version_ = 0;
+  acl_version_ = acl_version;
   acl_user_ = std::move(user);
   acl_unrestricted_ = IsAclUserUnrestricted(acl_user_);
 }
@@ -294,28 +295,30 @@ bool Connection::HasAclAllKeysAccess() const {
   return false;
 }
 
+Status Connection::DeauthenticateAndRequireAuth(AclDenyReason *deny_reason_out) {
+  ClearAclProfile();
+  ns_.clear();
+  is_admin_ = false;
+  if (deny_reason_out) *deny_reason_out = AclDenyReason::None;
+  return {Status::RedisNoAuth, "Authentication required"};
+}
+
 namespace {
 
 uint32_t CommandRequiredKeyPerm(uint64_t cmd_flags) {
   return (cmd_flags & redis::kCmdWrite) ? redis::kAclKeyWrite : redis::kAclKeyRead;
 }
 
-bool MatchSimpleAclPattern(std::string_view pattern, std::string_view target) {
-  if (pattern.empty()) {
-    return target.empty();
+bool MatchAclKeyPattern(const AclKeyPattern &pattern, std::string_view key) {
+  switch (pattern.match_mode) {
+    case AclKeyPattern::MatchMode::kExact:
+      return pattern.pattern == key;
+    case AclKeyPattern::MatchMode::kPrefix:
+      return util::StartsWith(key, pattern.prefix);
+    case AclKeyPattern::MatchMode::kGlob:
+      return util::StringMatch(pattern.pattern, key, false);
   }
-
-  const auto first_meta = pattern.find_first_of("*?[]\\");
-  if (first_meta == std::string_view::npos) {
-    return pattern == target;
-  }
-
-  // Fast path for the common ACL key form: `prefix*`.
-  if (pattern.back() == '*' && first_meta == pattern.size() - 1) {
-    return util::StartsWith(target, pattern.substr(0, pattern.size() - 1));
-  }
-
-  return util::StringMatch(pattern, target, false);
+  return false;
 }
 
 bool SelectorAllowsKey(const redis::AclSelector &selector, const std::string &key, uint32_t required_perm) {
@@ -326,7 +329,7 @@ bool SelectorAllowsKey(const redis::AclSelector &selector, const std::string &ke
     if ((pattern.flags & required_perm) == 0) {
       continue;
     }
-    if (MatchSimpleAclPattern(pattern.pattern, key)) {
+    if (MatchAclKeyPattern(pattern, key)) {
       return true;
     }
   }
@@ -415,20 +418,12 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
     if (!cached_user) {
       // Fail closed: deauthenticate the connection and require re-authentication.
       // This prevents a weakened long-lived session when the ACL user has been deleted/reloaded.
-      ClearAclProfile();
-      ns_.clear();
-      is_admin_ = false;
-      if (deny_reason_out) *deny_reason_out = AclDenyReason::None;
-      return {Status::RedisNoAuth, "Authentication required"};
+      return DeauthenticateAndRequireAuth(deny_reason_out);
     }
 
     // Verify username at slot matches the stored identity to guard against slot reuse races.
     if (!acl->IsUsernameMatchedByIndex(acl_user_index_, acl_username_)) {
-      ClearAclProfile();
-      ns_.clear();
-      is_admin_ = false;
-      if (deny_reason_out) *deny_reason_out = AclDenyReason::None;
-      return {Status::RedisNoAuth, "Authentication required"};
+      return DeauthenticateAndRequireAuth(deny_reason_out);
     }
 
     acl_user_ = std::move(cached_user);
@@ -726,7 +721,7 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
           if (default_user->user && default_user->user->enabled && default_user->user->nopass) {
             BecomeUser();
             SetNamespace(default_user->user->ns.empty() ? kDefaultNamespace : default_user->user->ns);
-            SetAclProfile("default", default_user->index, std::move(default_user->user));
+            SetAclProfile("default", default_user->index, std::move(default_user->user), srv_->GetAcl()->GetVersion());
           } else {
             require_auth = true;
           }

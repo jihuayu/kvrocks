@@ -22,6 +22,7 @@ package acl
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +86,13 @@ func requireACLDenied(t *testing.T, err error) {
 	t.Helper()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "NOPERM")
+}
+
+func requireACLRejectedLine(t *testing.T, line string) {
+	t.Helper()
+	require.True(t, line != "+OK", "ACL-protected command must not be accepted")
+	require.True(t, strings.Contains(line, "NOPERM") || strings.Contains(line, "NOAUTH"),
+		"expected NOPERM or NOAUTH, got: %s", line)
 }
 
 func authAsUser(t *testing.T, ctx context.Context, rdb *redis.Client, username, password string) {
@@ -710,6 +718,46 @@ func TestACLPSubscribeAllPatternRemainsLiteral(t *testing.T) {
 	res := allowed.Do(ctx, "PSUBSCRIBE", "*")
 	require.NoError(t, res.Err())
 	require.Equal(t, "[psubscribe * 1]", fmt.Sprintf("%v", res.Val()))
+}
+
+func TestACLFastPathEquivalenceForCommonMatrix(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "fast_eq", "on", ">p",
+		"allcommands", "allkeys", "allchannels").Err())
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "slow_eq", "on", ">p",
+		"nocommands", "+get", "+set", "+publish", "+psubscribe", "~*", "resetchannels", "&*").Err())
+
+	require.NoError(t, admin.Set(ctx, "eq:key", "v0", 0).Err())
+
+	runMatrix := func(t *testing.T, user string) {
+		client := srv.NewClient()
+		defer func() { require.NoError(t, client.Close()) }()
+		authAsUser(t, ctx, client, user, "p")
+
+		val, err := client.Get(ctx, "eq:key").Result()
+		require.NoError(t, err)
+		require.Equal(t, "v0", val)
+
+		require.NoError(t, client.Set(ctx, "eq:key", "v1", 0).Err())
+		require.NoError(t, client.Do(ctx, "PUBLISH", "eq:ch:1", "msg").Err())
+
+		ps := client.Do(ctx, "PSUBSCRIBE", "*")
+		require.NoError(t, ps.Err())
+		require.Equal(t, "[psubscribe * 1]", fmt.Sprintf("%v", ps.Val()))
+	}
+
+	t.Run("unrestricted user", func(t *testing.T) {
+		runMatrix(t, "fast_eq")
+	})
+	t.Run("explicit rules user", func(t *testing.T) {
+		runMatrix(t, "slow_eq")
+	})
 }
 
 func TestACLSelectorOrSemanticsForKeyChecks(t *testing.T) {
@@ -1486,9 +1534,8 @@ func TestACLPermissionDowngradeAppliesOnNextCommand(t *testing.T) {
 
 	require.NoError(t, conn.WriteArgs("SET", "k", "v1"))
 	line, err := conn.ReadLine()
-	if err == nil {
-		require.NotEqual(t, "+OK", line, "connection must not keep stale elevated SET permission")
-	}
+	require.NoError(t, err)
+	requireACLRejectedLine(t, line)
 }
 
 // TestACLSortDynamicPatternGuardrail validates Item #4:
