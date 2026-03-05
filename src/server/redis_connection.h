@@ -240,6 +240,8 @@ class Connection : public EvbufCallbackBase<Connection> {
   std::string acl_username_;
   size_t acl_user_index_ = kInvalidAclUserIndex;
   std::shared_ptr<const AclUser> acl_user_;
+  uint64_t acl_version_ = 0;
+  bool acl_unrestricted_ = false;
 
   Server *srv_;
   bool in_exec_ = false;

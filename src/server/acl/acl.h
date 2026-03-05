@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <string>
@@ -60,6 +61,7 @@ class Acl {
   std::vector<std::string> ListUsers() const;
   std::optional<std::string> GetUsernameByIndex(size_t index) const;
   bool IsUsernameMatchedByIndex(size_t index, const std::string &username) const;
+  uint64_t GetVersion() const { return version_.load(std::memory_order_relaxed); }
 
   Status HandleSetUser(Namespace *ns_mgr, const std::string &username, const std::vector<std::string> &modifiers,
                        std::string *output, bool strict_namespace = true);
@@ -86,8 +88,11 @@ class Acl {
   Status SaveAclToFile(const std::string &path) const;
 
  private:
+  void BumpVersion() { version_.fetch_add(1, std::memory_order_relaxed); }
+
   engine::Storage *storage_;
   std::unique_ptr<AclUserManager> user_manager_;
+  std::atomic<uint64_t> version_{1};
   AclLog acl_log_;
 };
 

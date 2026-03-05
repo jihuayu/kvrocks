@@ -687,6 +687,31 @@ func TestACLPSubscribeMatchesLiteralPattern(t *testing.T) {
 	requireACLDenied(t, denied.Do(ctx, "PSUBSCRIBE", "news:1").Err())
 }
 
+func TestACLPSubscribeAllPatternRemainsLiteral(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	// allcommands + allkeys + &* should not be treated as allchannels.
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "pat_all", "on", ">p",
+		"allcommands", "allkeys", "resetchannels", "&*").Err())
+
+	denied := srv.NewClient()
+	defer func() { require.NoError(t, denied.Close()) }()
+	authAsUser(t, ctx, denied, "pat_all", "p")
+	requireACLDenied(t, denied.Do(ctx, "PSUBSCRIBE", "news:*").Err())
+
+	allowed := srv.NewClient()
+	defer func() { require.NoError(t, allowed.Close()) }()
+	authAsUser(t, ctx, allowed, "pat_all", "p")
+	res := allowed.Do(ctx, "PSUBSCRIBE", "*")
+	require.NoError(t, res.Err())
+	require.Equal(t, "[psubscribe * 1]", fmt.Sprintf("%v", res.Val()))
+}
+
 func TestACLSelectorOrSemanticsForKeyChecks(t *testing.T) {
 	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
 	defer srv.Close()
@@ -1436,6 +1461,34 @@ func TestACLContextMissFailsClosed(t *testing.T) {
 		// Accept either connection-closed or NOAUTH as the fail-closed response.
 		return line != "+PONG"
 	}, 5*time.Second, 50*time.Millisecond)
+}
+
+func TestACLPermissionDowngradeAppliesOnNextCommand(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "downgrade", "on", ">p", "+get", "+set", "~*").Err())
+
+	conn := srv.NewTCPClient()
+	defer func() { require.NoError(t, conn.Close()) }()
+
+	require.NoError(t, conn.WriteArgs("AUTH", "downgrade", "p"))
+	conn.MustRead(t, "+OK")
+	require.NoError(t, conn.WriteArgs("SET", "k", "v0"))
+	conn.MustRead(t, "+OK")
+
+	// Remove write command permission while the same connection is alive.
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "downgrade", "nocommands", "+get").Err())
+
+	require.NoError(t, conn.WriteArgs("SET", "k", "v1"))
+	line, err := conn.ReadLine()
+	if err == nil {
+		require.NotEqual(t, "+OK", line, "connection must not keep stale elevated SET permission")
+	}
 }
 
 // TestACLSortDynamicPatternGuardrail validates Item #4:

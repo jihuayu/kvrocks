@@ -86,6 +86,19 @@ RAW_DIR="${OUTPUT_DIR}/raw"
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
 die()  { echo "ERROR: $*" >&2; exit 1; }
 
+safe_ops_rate() {
+  local count=$1 elapsed=$2
+  if ! [[ "$count" =~ ^[0-9]+$ && "$elapsed" =~ ^-?[0-9]+$ ]]; then
+    echo "N/A"
+    return
+  fi
+  local denom=$((elapsed + 1))
+  if ((denom <= 0)); then
+    denom=1
+  fi
+  echo $((count / denom))
+}
+
 wait_for_kvrocks() {
   local port=$1
   local tries=0
@@ -372,31 +385,36 @@ run_s11_admin() {
   # ACL SETUSER throughput
   local admin_n=200
   log "  Timing ${admin_n}x ACL SETUSER ..."
-  local t_start=$SECONDS
+  local t_start
+  t_start=$(date +%s)
   for i in $(seq 1 "$admin_n"); do
     timeout 2 redis-cli -p "$port" ACL SETUSER "tmp:u${i}" on ">pass" allcommands allkeys >/dev/null 2>&1 || true
   done
-  local t_setuser=$((SECONDS - t_start))
+  local t_end
+  t_end=$(date +%s)
+  local t_setuser=$((t_end - t_start))
   echo "SETUSER_${admin_n}_elapsed_sec=${t_setuser}" > "${outdir}/setuser_timing.txt"
-  log "  ${admin_n}x ACL SETUSER: ${t_setuser}s (~$(( admin_n / (t_setuser+1) )) ops/s)"
+  log "  ${admin_n}x ACL SETUSER: ${t_setuser}s (~$(safe_ops_rate "$admin_n" "$t_setuser") ops/s)"
 
   # ACL DELUSER
   log "  Timing ${admin_n}x ACL DELUSER ..."
-  t_start=$SECONDS
+  t_start=$(date +%s)
   for i in $(seq 1 "$admin_n"); do
     timeout 2 redis-cli -p "$port" ACL DELUSER "tmp:u${i}" >/dev/null 2>&1 || true
   done
-  local t_deluser=$((SECONDS - t_start))
+  t_end=$(date +%s)
+  local t_deluser=$((t_end - t_start))
   echo "DELUSER_${admin_n}_elapsed_sec=${t_deluser}" >> "${outdir}/setuser_timing.txt"
-  log "  ${admin_n}x ACL DELUSER: ${t_deluser}s (~$(( admin_n / (t_deluser+1) )) ops/s)"
+  log "  ${admin_n}x ACL DELUSER: ${t_deluser}s (~$(safe_ops_rate "$admin_n" "$t_deluser") ops/s)"
 
   # ACL DRYRUN
   log "  Timing ${admin_n}x ACL DRYRUN ..."
-  t_start=$SECONDS
+  t_start=$(date +%s)
   for i in $(seq 1 "$admin_n"); do
     timeout 2 redis-cli -p "$port" ACL DRYRUN bench GET "bench:key${i}" >/dev/null 2>&1 || true
   done
-  local t_dryrun=$((SECONDS - t_start))
+  t_end=$(date +%s)
+  local t_dryrun=$((t_end - t_start))
   echo "DRYRUN_${admin_n}_elapsed_sec=${t_dryrun}" >> "${outdir}/setuser_timing.txt"
   log "  ${admin_n}x ACL DRYRUN: ${t_dryrun}s"
 
@@ -990,45 +1008,6 @@ run_s05_s07() {
     -d 64 -r 100000 \
     GET "deny:__rand_int__" > "${outdir2}/key_deny_m3.txt" 2>&1 || true
   collect_info S06 "m3" "$port"
-}
-
-run_s11_admin() {
-  log "=== S11: ACL admin throughput (SETUSER/DELUSER) ==="
-  local port=$PORT_M2
-  local outdir="${RAW_DIR}/S11"; mkdir -p "$outdir"
-
-  # ACL SETUSER throughput
-  local admin_n=200
-  log "  Timing ${admin_n}x ACL SETUSER ..."
-  local t_start=$SECONDS
-  for i in $(seq 1 "$admin_n"); do
-    timeout 2 redis-cli -p "$port" ACL SETUSER "tmp:u${i}" on ">pass" allcommands allkeys >/dev/null 2>&1 || true
-  done
-  local t_setuser=$((SECONDS - t_start))
-  echo "SETUSER_${admin_n}_elapsed_sec=${t_setuser}" > "${outdir}/setuser_timing.txt"
-  log "  ${admin_n}x ACL SETUSER: ${t_setuser}s (~$(( admin_n / (t_setuser+1) )) ops/s)"
-
-  # ACL DELUSER
-  log "  Timing ${admin_n}x ACL DELUSER ..."
-  t_start=$SECONDS
-  for i in $(seq 1 "$admin_n"); do
-    timeout 2 redis-cli -p "$port" ACL DELUSER "tmp:u${i}" >/dev/null 2>&1 || true
-  done
-  local t_deluser=$((SECONDS - t_start))
-  echo "DELUSER_${admin_n}_elapsed_sec=${t_deluser}" >> "${outdir}/setuser_timing.txt"
-  log "  ${admin_n}x ACL DELUSER: ${t_deluser}s (~$(( admin_n / (t_deluser+1) )) ops/s)"
-
-  # ACL DRYRUN
-  log "  Timing ${admin_n}x ACL DRYRUN ..."
-  t_start=$SECONDS
-  for i in $(seq 1 "$admin_n"); do
-    timeout 2 redis-cli -p "$port" ACL DRYRUN bench GET "bench:key${i}" >/dev/null 2>&1 || true
-  done
-  local t_dryrun=$((SECONDS - t_start))
-  echo "DRYRUN_${admin_n}_elapsed_sec=${t_dryrun}" >> "${outdir}/setuser_timing.txt"
-  log "  ${admin_n}x ACL DRYRUN: ${t_dryrun}s"
-
-  collect_info S11 "m2" "$port"
 }
 
 run_s13_s16_large_users() {

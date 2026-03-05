@@ -48,6 +48,43 @@
 
 namespace redis {
 
+namespace {
+
+bool SelectorMatchesAllKeys(const AclSelector &selector) {
+  if ((selector.flags & redis::kAclSelectorAllKeys) != 0) {
+    return true;
+  }
+  for (const auto &pattern : selector.key_patterns) {
+    if (pattern.pattern == "*" && (pattern.flags & redis::kAclKeyAll) == redis::kAclKeyAll) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool SelectorMatchesAllChannels(const AclSelector &selector) {
+  return (selector.flags & redis::kAclSelectorAllChannels) != 0;
+}
+
+bool IsAclUserUnrestricted(const std::shared_ptr<const AclUser> &user) {
+  if (!user) {
+    return false;
+  }
+
+  for (const auto &selector : user->allowed_commands) {
+    if ((selector.flags & redis::kAclSelectorAllCommands) == 0) {
+      continue;
+    }
+    if (SelectorMatchesAllKeys(selector) && SelectorMatchesAllChannels(selector)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+}  // namespace
+
 Connection::Connection(bufferevent *bev, Worker *owner)
     : need_free_bev_(true), bev_(bev), req_(owner->srv), owner_(owner), srv_(owner->srv) {
   int64_t now = util::GetTimeStamp();
@@ -231,13 +268,17 @@ void Connection::SetAclProfile(const std::string &username, size_t user_index, s
   acl_enforced_ = true;
   acl_username_ = username;
   acl_user_index_ = user_index;
+  acl_version_ = 0;
   acl_user_ = std::move(user);
+  acl_unrestricted_ = IsAclUserUnrestricted(acl_user_);
 }
 
 void Connection::ClearAclProfile() {
   acl_enforced_ = false;
   acl_username_.clear();
   acl_user_index_ = kInvalidAclUserIndex;
+  acl_version_ = 0;
+  acl_unrestricted_ = false;
   acl_user_.reset();
 }
 
@@ -259,6 +300,24 @@ uint32_t CommandRequiredKeyPerm(uint64_t cmd_flags) {
   return (cmd_flags & redis::kCmdWrite) ? redis::kAclKeyWrite : redis::kAclKeyRead;
 }
 
+bool MatchSimpleAclPattern(std::string_view pattern, std::string_view target) {
+  if (pattern.empty()) {
+    return target.empty();
+  }
+
+  const auto first_meta = pattern.find_first_of("*?[]\\");
+  if (first_meta == std::string_view::npos) {
+    return pattern == target;
+  }
+
+  // Fast path for the common ACL key form: `prefix*`.
+  if (pattern.back() == '*' && first_meta == pattern.size() - 1) {
+    return util::StartsWith(target, pattern.substr(0, pattern.size() - 1));
+  }
+
+  return util::StringMatch(pattern, target, false);
+}
+
 bool SelectorAllowsKey(const redis::AclSelector &selector, const std::string &key, uint32_t required_perm) {
   if ((selector.flags & redis::kAclSelectorAllKeys) != 0) {
     return true;
@@ -267,7 +326,7 @@ bool SelectorAllowsKey(const redis::AclSelector &selector, const std::string &ke
     if ((pattern.flags & required_perm) == 0) {
       continue;
     }
-    if (util::StringMatch(pattern.pattern, key, false)) {
+    if (MatchSimpleAclPattern(pattern.pattern, key)) {
       return true;
     }
   }
@@ -296,6 +355,18 @@ bool SelectorAllowsKeys(const redis::AclSelector &selector, const CommandAttribu
 
 enum class ChannelMatchMode { kGlob, kLiteral };
 
+enum class ChannelCommandMode { kNone, kGlob, kLiteral };
+
+ChannelCommandMode GetChannelCommandMode(std::string_view command) {
+  if (command == "publish" || command == "spublish" || command == "subscribe" || command == "ssubscribe") {
+    return ChannelCommandMode::kGlob;
+  }
+  if (command == "psubscribe") {
+    return ChannelCommandMode::kLiteral;
+  }
+  return ChannelCommandMode::kNone;
+}
+
 bool MatchSelectorChannel(const redis::AclSelector &selector, const std::string &channel, ChannelMatchMode mode) {
   if ((selector.flags & redis::kAclSelectorAllChannels) != 0) {
     return true;
@@ -312,24 +383,13 @@ bool MatchSelectorChannel(const redis::AclSelector &selector, const std::string 
   return false;
 }
 
-bool SelectorAllowsChannels(const redis::AclSelector &selector, const std::string &command,
-                            const std::vector<std::string> &cmd_tokens) {
-  if (cmd_tokens.size() <= 1) {
+bool SelectorAllowsChannels(const redis::AclSelector &selector, const std::vector<std::string> &cmd_tokens,
+                            ChannelCommandMode mode) {
+  if (mode == ChannelCommandMode::kNone || cmd_tokens.size() <= 1) {
     return true;
   }
 
-  bool is_channel_command = false;
-  ChannelMatchMode match_mode = ChannelMatchMode::kGlob;
-  if (command == "publish" || command == "spublish" || command == "subscribe" || command == "ssubscribe") {
-    is_channel_command = true;
-  } else if (command == "psubscribe") {
-    is_channel_command = true;
-    match_mode = ChannelMatchMode::kLiteral;
-  }
-
-  if (!is_channel_command) {
-    return true;
-  }
+  const auto match_mode = mode == ChannelCommandMode::kLiteral ? ChannelMatchMode::kLiteral : ChannelMatchMode::kGlob;
 
   for (size_t i = 1; i < cmd_tokens.size(); ++i) {
     if (!MatchSelectorChannel(selector, cmd_tokens[i], match_mode)) {
@@ -349,34 +409,45 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
     return Status::OK();
   }
 
-  auto cached_user = acl->GetCachedUserByIndex(acl_user_index_);
-  if (!cached_user) {
-    // Fail closed: deauthenticate the connection and require re-authentication.
-    // This prevents a weakened long-lived session when the ACL user has been deleted/reloaded.
-    ClearAclProfile();
-    ns_.clear();
-    is_admin_ = false;
-    if (deny_reason_out) *deny_reason_out = AclDenyReason::None;
-    return {Status::RedisNoAuth, "Authentication required"};
-  }
+  const auto acl_version = acl->GetVersion();
+  if (!acl_user_ || acl_version_ != acl_version) {
+    auto cached_user = acl->GetCachedUserByIndex(acl_user_index_);
+    if (!cached_user) {
+      // Fail closed: deauthenticate the connection and require re-authentication.
+      // This prevents a weakened long-lived session when the ACL user has been deleted/reloaded.
+      ClearAclProfile();
+      ns_.clear();
+      is_admin_ = false;
+      if (deny_reason_out) *deny_reason_out = AclDenyReason::None;
+      return {Status::RedisNoAuth, "Authentication required"};
+    }
 
-  // Verify username at slot matches the stored identity to guard against slot reuse races.
-  if (!acl->IsUsernameMatchedByIndex(acl_user_index_, acl_username_)) {
-    ClearAclProfile();
-    ns_.clear();
-    is_admin_ = false;
-    if (deny_reason_out) *deny_reason_out = AclDenyReason::None;
-    return {Status::RedisNoAuth, "Authentication required"};
-  }
+    // Verify username at slot matches the stored identity to guard against slot reuse races.
+    if (!acl->IsUsernameMatchedByIndex(acl_user_index_, acl_username_)) {
+      ClearAclProfile();
+      ns_.clear();
+      is_admin_ = false;
+      if (deny_reason_out) *deny_reason_out = AclDenyReason::None;
+      return {Status::RedisNoAuth, "Authentication required"};
+    }
 
-  acl_user_ = std::move(cached_user);
+    acl_user_ = std::move(cached_user);
+    acl_version_ = acl_version;
+    acl_unrestricted_ = IsAclUserUnrestricted(acl_user_);
+  }
 
   if (!acl_user_->enabled) {
     if (deny_reason_out) *deny_reason_out = AclDenyReason::Command;
     return {Status::RedisNoPerm, "ACL user is disabled"};
   }
 
-  const auto command = util::ToLower(attributes->name);
+  if (acl_unrestricted_) {
+    if (deny_reason_out) *deny_reason_out = AclDenyReason::None;
+    return Status::OK();
+  }
+
+  const auto &command = attributes->name;
+  const auto channel_mode = GetChannelCommandMode(command);
 
   // Use cached bit index to avoid map lookup and lock on the hot path.
   auto cached_bit = attributes->GetOrResolveAclBit();
@@ -396,7 +467,7 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
       any_key_denied = true;
       continue;
     }
-    if (!SelectorAllowsChannels(selector, command, cmd_tokens)) {
+    if (!SelectorAllowsChannels(selector, cmd_tokens, channel_mode)) {
       any_channel_denied = true;
       continue;
     }

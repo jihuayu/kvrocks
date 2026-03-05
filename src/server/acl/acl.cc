@@ -223,6 +223,8 @@ Status Acl::Set(const std::string &username, const AclUser &user) {
     return status;
   }
 
+  BumpVersion();
+
   return Status::OK();
 }
 
@@ -241,6 +243,8 @@ Status Acl::Del(const std::string &username) {
     user_manager_->SetUser(username, existing);
     return status;
   }
+
+  BumpVersion();
 
   return Status::OK();
 }
@@ -293,6 +297,7 @@ Status Acl::LoadAcl() {
   }
 
   user_manager_ = std::move(new_manager);
+  BumpVersion();
   return Status::OK();
 }
 
@@ -579,6 +584,7 @@ Status Acl::ApplyReplicatedUpdate(const std::string &username, const std::string
 
   auto new_entry = std::make_shared<const AclUser>(user_or.GetValue());
   user_manager_->SetUser(username, new_entry);
+  BumpVersion();
 
   return Status::OK();
 }
@@ -588,6 +594,7 @@ Status Acl::ApplyReplicatedDeletion(const std::string &username) {
     // User might not exist in cache, which is okay for replication
     return Status::OK();
   }
+  BumpVersion();
   return Status::OK();
 }
 
@@ -681,6 +688,7 @@ Status Acl::LoadAclFromFile(const std::string &path, Namespace *ns_mgr, bool str
   }
   auto old_manager = std::move(user_manager_);
   user_manager_ = std::move(new_manager);
+  BumpVersion();
 
   // Phase 4: Persist changes to storage. Remove old users not in file; write new/updated users.
   // On storage errors we log best-effort; the in-memory state is already consistent.

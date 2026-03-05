@@ -183,6 +183,37 @@ TEST_F(AclTest, DeleteUser) {
   EXPECT_TRUE(deleted_or.Is<Status::NotFound>());
 }
 
+TEST_F(AclTest, VersionIncrementsOnMutations) {
+  auto acl = createAcl();
+  auto before_set = acl->GetVersion();
+
+  ASSERT_TRUE(acl->Set("version_user", BuildUser(true, "default")).IsOK());
+  auto after_set = acl->GetVersion();
+  EXPECT_GT(after_set, before_set);
+
+  ASSERT_TRUE(acl->Set("version_user", BuildUser(false, "default")).IsOK());
+  auto after_update = acl->GetVersion();
+  EXPECT_GT(after_update, after_set);
+
+  ASSERT_TRUE(acl->Del("version_user").IsOK());
+  auto after_del = acl->GetVersion();
+  EXPECT_GT(after_del, after_update);
+}
+
+TEST_F(AclTest, VersionIncrementsOnReplicatedMutations) {
+  auto acl = createAcl();
+  auto before_update = acl->GetVersion();
+
+  auto user = BuildUser(true, "default");
+  ASSERT_TRUE(acl->ApplyReplicatedUpdate("replicated_user", user.ToJson().to_string()).IsOK());
+  auto after_update = acl->GetVersion();
+  EXPECT_GT(after_update, before_update);
+
+  ASSERT_TRUE(acl->ApplyReplicatedDeletion("replicated_user").IsOK());
+  auto after_delete = acl->GetVersion();
+  EXPECT_GT(after_delete, after_update);
+}
+
 TEST_F(AclTest, ListUsers) {
   auto acl = createAcl();
   auto user = BuildUser(true, "default");
