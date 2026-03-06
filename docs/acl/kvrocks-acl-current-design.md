@@ -141,6 +141,14 @@ When first command arrives and connection has no namespace yet:
 - otherwise auth may be required depending on `requirepass`
 - if auth is not required, connection defaults to admin mode in `__namespace`
 
+### 5.4 `ACL SETUSER ... off` behavior
+
+Kvrocks follows Redis behavior for disabling users:
+
+- `off` blocks future authentication attempts for that user.
+- existing authenticated connections for that user are not forcibly deauthenticated by `off` alone.
+- ACL permission updates (commands/keys/channels) still take effect on the next command via ACL version refresh.
+
 ## 6. Authorization Flow
 
 ### 6.1 Where ACL is enforced
@@ -167,7 +175,6 @@ Current high-level order:
 For the current ACL user profile:
 
 - user must still exist in cache by index
-- user must be enabled
 - selectors are evaluated with OR semantics
 - each selector requires all of:
   - command allowed
@@ -175,6 +182,10 @@ For the current ACL user profile:
   - channel constraints satisfied for Pub/Sub commands
 
 If none passes, command is denied with `NOPERM`.
+
+Note:
+
+- `enabled` is checked during authentication, not as a runtime gate for already-authenticated sessions.
 
 ## 7. Namespace Interaction
 

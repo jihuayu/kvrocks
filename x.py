@@ -116,7 +116,10 @@ def prepare() -> None:
 
 def build(dir: str, jobs: Optional[int] = None, ninja: bool = False, unittest: bool = False,
           compiler: str = 'auto', cmake_path: str = 'cmake', D: List[str] = [], skip_build: bool = False,
-          dep_dir: Optional[str] = None, toolchain: Optional[str] = None) -> None:
+          dep_dir: Optional[str] = None, toolchain: Optional[str] = None, build_type: str = 'RelWithDebInfo',
+          ccache: bool = False, linker: str = 'auto', unity: bool = False,
+          unity_batch_size: int = 8, dev: bool = False, ninja_make_jobs: Optional[int] = None,
+          debug_info: str = 'default', split_dwarf: bool = False, dev_fast: bool = False) -> None:
     basedir = Path(__file__).parent.absolute()
 
     find_command("autoconf", msg="autoconf is required to build jemalloc")
@@ -130,7 +133,74 @@ def build(dir: str, jobs: Optional[int] = None, ninja: bool = False, unittest: b
 
     os.makedirs(dir, exist_ok=True)
 
-    cmake_options = ["-DCMAKE_BUILD_TYPE=RelWithDebInfo"]
+    cmake_options = [f"-DCMAKE_BUILD_TYPE={build_type}"]
+
+    # Developer-friendly defaults focusing on rebuild speed.
+    # Explicit -D key=value flags still override these defaults.
+    if dev:
+        ninja = True
+        ccache = True
+        cmake_options += [
+            "-DCMAKE_BUILD_TYPE=Debug",
+            "-DENABLE_LTO=OFF",
+            "-DENABLE_STATIC_LIBSTDCXX=OFF",
+        ]
+        if linker == 'auto':
+            if which("mold") is not None:
+                linker = 'mold'
+            elif which("ld.lld") is not None or which("lld") is not None:
+                linker = 'lld'
+
+    # Extreme developer preset focusing on fastest rebuilds rather than debug fidelity.
+    if dev_fast:
+        ninja = True
+        ccache = True
+        cmake_options += [
+            "-DCMAKE_BUILD_TYPE=Debug",
+            "-DENABLE_LTO=OFF",
+            "-DENABLE_STATIC_LIBSTDCXX=OFF",
+            "-DKVROCKS_DEBUG_INFO=line",
+            "-DENABLE_SPLIT_DWARF=ON",
+        ]
+        # Prefer clang for faster compile + better lld integration when available.
+        if compiler == 'auto' and which("clang") is not None and which("clang++") is not None:
+            compiler = 'clang'
+        if linker == 'auto':
+            if which("mold") is not None:
+                linker = 'mold'
+            elif which("ld.lld") is not None or which("lld") is not None:
+                linker = 'lld'
+
+    if ccache:
+        if which("ccache") is None:
+            print("warning: --ccache was requested but ccache was not found in PATH")
+        else:
+            cmake_options += [
+                "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+                "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+            ]
+
+    if unity:
+        cmake_options += [
+            "-DENABLE_UNITY_BUILD=ON",
+            f"-DUNITY_BUILD_BATCH_SIZE={unity_batch_size}",
+        ]
+
+    if debug_info != 'default':
+        cmake_options.append(f"-DKVROCKS_DEBUG_INFO={debug_info}")
+
+    if split_dwarf:
+        cmake_options.append("-DENABLE_SPLIT_DWARF=ON")
+
+    if linker != 'auto':
+        cmake_options.append(f"-DKVROCKS_LINKER={linker}")
+
+    # Some bundled deps are built via `make` even under Ninja. Use NINJA_MAKE_JOBS to avoid a low default.
+    if ninja_make_jobs is not None:
+        cmake_options.append(f"-DNINJA_MAKE_JOBS={ninja_make_jobs}")
+    elif ninja and jobs:
+        cmake_options.append(f"-DNINJA_MAKE_JOBS={jobs}")
+
     if toolchain:
        cmake_options.append(f"-DCMAKE_TOOLCHAIN_FILE={toolchain}")
     if ninja:
@@ -404,6 +474,26 @@ if __name__ == '__main__':
                               help="compiler used to build kvrocks")
     parser_build.add_argument('--toolchain', metavar='FILE', help="path to CMake toolchain file for cross-compiling")
     parser_build.add_argument('--cmake-path', default='cmake', help="path of cmake binary used to build kvrocks")
+    parser_build.add_argument('--build-type', default='RelWithDebInfo',
+                              help='CMake build type (e.g. Debug, Release, RelWithDebInfo)')
+    parser_build.add_argument('--ccache', default=False, action='store_true',
+                              help='use ccache via CMAKE_*_COMPILER_LAUNCHER when available')
+    parser_build.add_argument('--linker', default='auto', choices=('auto', 'mold', 'lld', 'gold', 'bfd'),
+                              help='use a specific linker via -fuse-ld (best effort)')
+    parser_build.add_argument('--unity', default=False, action='store_true',
+                              help='enable unity build for kvrocks targets')
+    parser_build.add_argument('--unity-batch-size', metavar='N', default=8, type=int,
+                              help='unity build batch size when --unity is enabled')
+    parser_build.add_argument('--dev', default=False, action='store_true',
+                              help='fast developer build preset (Debug, no LTO, no static libstdc++, Ninja, ccache)')
+    parser_build.add_argument('--dev-fast', default=False, action='store_true',
+                              help='extreme developer build preset (prefer Clang, line-table debug info, split DWARF)')
+    parser_build.add_argument('--ninja-make-jobs', metavar='N', type=int,
+                              help='concurrency used when Ninja triggers bundled deps built via make (NINJA_MAKE_JOBS)')
+    parser_build.add_argument('--debug-info', default='default', choices=('default', 'none', 'line', 'full'),
+                              help='debug info mode for Debug builds (trade debug fidelity for build speed)')
+    parser_build.add_argument('--split-dwarf', default=False, action='store_true',
+                              help='enable split DWARF (-gsplit-dwarf) in Debug builds (ELF only)')
     parser_build.add_argument('-D', action='append', metavar='key=value', help='extra CMake definitions')
     parser_build.add_argument('--skip-build', default=False, action='store_true',
                               help='runs only the configure stage, skip the build stage')

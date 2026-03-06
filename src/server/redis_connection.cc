@@ -431,10 +431,9 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
     acl_unrestricted_ = IsAclUserUnrestricted(acl_user_);
   }
 
-  if (!acl_user_->enabled) {
-    if (deny_reason_out) *deny_reason_out = AclDenyReason::Command;
-    return {Status::RedisNoPerm, "ACL user is disabled"};
-  }
+  // Redis-compatible semantics:
+  // disabling a user ("off") prevents future authentication, but already
+  // authenticated connections continue to run with ACL checks applied.
 
   if (acl_unrestricted_) {
     if (deny_reason_out) *deny_reason_out = AclDenyReason::None;

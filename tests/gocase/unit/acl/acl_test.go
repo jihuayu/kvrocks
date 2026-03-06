@@ -970,6 +970,41 @@ func TestACLDefaultOffRequiresAuthForNewConnections(t *testing.T) {
 	require.Contains(t, err.Error(), "HELLO must be called with the client already authenticated")
 }
 
+func TestACLUserOffKeepsExistingAuthenticatedConnections(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "keepalive", "on", ">p", "+set", "~*").Err())
+
+	conn := srv.NewTCPClient()
+	defer func() { require.NoError(t, conn.Close()) }()
+
+	require.NoError(t, conn.WriteArgs("AUTH", "keepalive", "p"))
+	conn.MustRead(t, "+OK")
+
+	require.NoError(t, conn.WriteArgs("SET", "k", "v0"))
+	conn.MustRead(t, "+OK")
+
+	// Redis-compatible behavior: disabling a user blocks new AUTH, but does
+	// not deauthenticate already-authenticated connections.
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "keepalive", "off").Err())
+
+	require.NoError(t, conn.WriteArgs("SET", "k", "v1"))
+	conn.MustRead(t, "+OK")
+
+	newConn := srv.NewTCPClient()
+	defer func() { require.NoError(t, newConn.Close()) }()
+
+	require.NoError(t, newConn.WriteArgs("AUTH", "keepalive", "p"))
+	line, err := newConn.ReadLine()
+	require.NoError(t, err)
+	require.Contains(t, line, "Invalid password")
+}
+
 func TestACLSanitizePayloadFlag(t *testing.T) {
 	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
 	defer srv.Close()

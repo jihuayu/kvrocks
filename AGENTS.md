@@ -20,8 +20,15 @@ While working on Apache Kvrocks, please remember:
 ./x.py build --unittest         # Build with unit tests
 ./x.py build -DENABLE_OPENSSL=ON  # Build with TLS support
 ./x.py build --ninja            # Use Ninja build system
+./x.py build --ccache           # Use ccache compiler cache (best effort)
+./x.py build --linker mold      # Use a faster linker via -fuse-ld (mold/lld)
+./x.py build --ninja-make-jobs N  # Keep bundled deps (make) parallel under Ninja
 ./x.py build --skip-build       # Only run CMake configure
 ./x.py build -DCMAKE_BUILD_TYPE=Debug  # Debug build
+./x.py build --dev              # Fast dev preset (Debug, no LTO, Ninja, ccache)
+./x.py build --dev-fast         # Extreme dev speed preset (line tables, split DWARF, prefers Clang)
+./x.py build --debug-info line  # Smaller debug info in Debug builds (speed vs fidelity)
+./x.py build --split-dwarf      # Enable split DWARF in Debug builds (ELF only)
 
 # Run a local server
 ./build/kvrocks -c kvrocks.conf
@@ -163,3 +170,18 @@ Common scopes: `server`, `storage`, `commands`, `cluster`, `search`, `types`, `r
 - Don't change public command behavior unless requested.
 - RocksDB is the core storage dependency; be cautious with storage-layer changes.
 - Adding a new column family breaks forward compatibility; avoid this if possible and prefer using existing column families.
+
+## Build Speed Tips (Dev)
+
+- Prefer `./x.py build --dev -j "$(nproc)"` for day-to-day iteration (fast, debuggable).
+- Prefer `./x.py build --dev-fast -j "$(nproc)"` when optimizing for rebuild speed over debug fidelity.
+- Install and use `ccache` and a fast linker (`mold` or `lld`) to reduce incremental build and link time.
+
+## Fastest Dev Build vs Incremental Build
+
+- Fastest clean build (optimize rebuild speed over debug fidelity): `./x.py build build-fast --dev-fast -j "$(nproc)"`.
+- Fastest clean rebuilds (optional): `./x.py build build-fast --dev-fast --unity --unity-batch-size 12 -j "$(nproc)"`.
+- Incremental build (edit-compile-test loop): `./x.py build build-dev --dev -j "$(nproc)"`.
+- Incremental speed tip: ensure `ccache` is installed and warm; `--dev/--dev-fast` will use it when available.
+- Incremental speed tip: prefer a fast linker (mold/lld). `--dev/--dev-fast` will auto-pick one when `--linker` is left as `auto`.
+- Incremental speed tip: if you use Ninja, keep bundled deps parallel too: `./x.py build build-dev --dev --ninja-make-jobs "$(nproc)" -j "$(nproc)"`.

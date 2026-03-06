@@ -121,6 +121,12 @@ $ ./x.py build --ninja --ccache --linker mold -DCMAKE_BUILD_TYPE=Debug -DENABLE_
 
 # Unity build can speed up full rebuilds (optional).
 $ ./x.py build --dev --unity --unity-batch-size 12 -j "$(nproc)"
+
+# Some bundled deps are built via make even under Ninja; keep them parallel too.
+$ ./x.py build --dev --ninja-make-jobs "$(nproc)" -j "$(nproc)"
+
+# Extreme rebuild speed (smaller debug info + split DWARF, prefers Clang when available).
+$ ./x.py build --dev-fast -j "$(nproc)"
 ```
 
 ### Running Kvrocks

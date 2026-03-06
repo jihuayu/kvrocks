@@ -49,8 +49,9 @@ ACL mutation includes:
 Acceptance criteria:
 
 1. If a user is deleted, subsequent commands on a previously authenticated connection fail closed (`NOAUTH` or connection closed by policy), never silent allow.
-2. If a user is downgraded or disabled, previously authenticated connections must not keep stale elevated permissions.
-3. Version-based invalidation tests must cover both direct mutations and replicated mutations.
+2. If a user is downgraded (commands/keys/channels changed), previously authenticated connections must observe the downgraded permissions on the next command.
+3. Disabling a user (`off`) blocks new authentication but does not forcibly deauthenticate existing authenticated sessions (Redis-compatible behavior).
+4. Version-based invalidation tests must cover both direct mutations and replicated mutations.
 
 ### R-ACL-003: ACL unrestricted fast path must be semantics-safe
 
