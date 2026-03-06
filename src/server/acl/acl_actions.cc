@@ -572,7 +572,7 @@ std::vector<uint32_t> BuildAllCategoryBitmap() {
 
 bool CommandBitmapIsAll(const std::vector<uint64_t> &bitmap) {
   auto normalized = NormalizeBitmap(bitmap);
-  auto all_bitmap = NormalizeBitmap(AclCommandManager::Instance().BuildBitmapForAllCommands());
+  const auto &all_bitmap = AclCommandManager::Instance().GetSealedAllBitmap();
   if (normalized.empty() || all_bitmap.empty()) {
     return false;
   }
@@ -585,7 +585,7 @@ std::vector<std::string> BuildCommandRules(const std::vector<uint64_t> &bitmap) 
     return {"-@all"};
   }
 
-  auto all_bitmap = NormalizeBitmap(AclCommandManager::Instance().BuildBitmapForAllCommands());
+  const auto &all_bitmap = AclCommandManager::Instance().GetSealedAllBitmap();
   if (!all_bitmap.empty() && normalized == all_bitmap) {
     return {"+@all"};
   }

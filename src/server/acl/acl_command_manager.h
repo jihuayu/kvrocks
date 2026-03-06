@@ -49,6 +49,9 @@ class AclCommandManager {
   bool IsCommandAllowed(const std::vector<uint64_t> &bitmap, const std::string &command) const;
   void Seal();
 
+  // Returns the cached normalized all-commands bitmap (only valid after Seal()).
+  const std::vector<uint64_t> &GetSealedAllBitmap() const { return all_bitmap_sealed_; }
+
   AclCommandManager(const AclCommandManager &) = delete;
   AclCommandManager &operator=(const AclCommandManager &) = delete;
   ~AclCommandManager() = default;
@@ -61,6 +64,8 @@ class AclCommandManager {
   std::map<std::string, CommandCategory> command_categories_;
   size_t next_bit_ = 0;
   std::atomic<bool> sealed_{false};
+  // Cached normalized all-commands bitmap, populated by Seal().
+  std::vector<uint64_t> all_bitmap_sealed_;
 };
 
 }  // namespace redis

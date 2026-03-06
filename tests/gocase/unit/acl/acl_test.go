@@ -22,6 +22,7 @@ package acl
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,16 @@ func authAsUser(t *testing.T, ctx context.Context, rdb *redis.Client, username, 
 	result, err := rdb.Do(ctx, "AUTH", username, password).Result()
 	require.NoError(t, err)
 	require.Equal(t, "OK", result)
+}
+
+func requireGetUserNotFound(t *testing.T, ctx context.Context, client *redis.Client, username string) {
+	t.Helper()
+	result, err := client.Do(ctx, "ACL", "GETUSER", username).Result()
+	if err != nil {
+		require.Contains(t, err.Error(), "nil")
+		return
+	}
+	require.Nil(t, result)
 }
 
 func TestACLPreviewDisabled(t *testing.T) {
@@ -760,6 +771,27 @@ func TestACLFastPathEquivalenceForCommonMatrix(t *testing.T) {
 	})
 }
 
+func TestACLPublishUsesOnlyChannelArgumentForACLCheck(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
+	defer srv.Close()
+
+	ctx := context.Background()
+	admin := srv.NewClient()
+	defer func() { require.NoError(t, admin.Close()) }()
+
+	require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "pub_argpos", "on", ">p",
+		"nocommands", "+publish", "resetchannels", "&news:*").Err())
+
+	userClient := srv.NewClient()
+	defer func() { require.NoError(t, userClient.Close()) }()
+	authAsUser(t, ctx, userClient, "pub_argpos", "p")
+
+	// Regression: message payload must not be treated as a channel argument.
+	require.NoError(t, userClient.Do(ctx, "PUBLISH", "news:chan", "private:payload").Err())
+
+	requireACLDenied(t, userClient.Do(ctx, "PUBLISH", "private:chan", "news:chan").Err())
+}
+
 func TestACLSelectorOrSemanticsForKeyChecks(t *testing.T) {
 	srv := util.StartServer(t, map[string]string{"acl-preview-enabled": "yes"})
 	defer srv.Close()
@@ -1177,7 +1209,7 @@ func TestACLLog(t *testing.T) {
 		require.Equal(t, "set", entry["object"])
 		require.Equal(t, "logtest", entry["username"])
 		require.Equal(t, "toplevel", entry["context"])
-		require.NotEmpty(t, entry["client-info"])
+		require.Empty(t, entry["client-info"])
 		require.NotEmpty(t, entry["entry-id"])
 		require.NotEmpty(t, entry["timestamp-created"])
 		require.NotEmpty(t, entry["timestamp-last-updated"])
@@ -1268,6 +1300,66 @@ func TestACLLog(t *testing.T) {
 
 		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "logauth").Err())
 	})
+
+	t.Run("sanitize_payload controls ACL LOG object and client-info", func(t *testing.T) {
+		findByReason := func(entries []interface{}, reason string) map[string]string {
+			for _, raw := range entries {
+				entry := parseAclLogEntry(t, raw)
+				if entry["reason"] == reason {
+					return entry
+				}
+			}
+			return nil
+		}
+
+		require.NoError(t, admin.Do(ctx, "ACL", "LOG", "RESET").Err())
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "logsanitize", "reset", "on", ">p",
+			"nocommands", "+get", "+publish", "resetkeys", "~public:*", "resetchannels", "&news:*").Err())
+
+		sanitizedClient := srv.NewClientWithOption(&redis.Options{Username: "logsanitize", Password: "p", PoolSize: 1})
+		defer func() { require.NoError(t, sanitizedClient.Close()) }()
+		_ = sanitizedClient.Get(ctx, "secret:key").Err()
+		_ = sanitizedClient.Do(ctx, "PUBLISH", "secret:chan", "sensitive-message").Err()
+
+		res, err := admin.Do(ctx, "ACL", "LOG").Result()
+		require.NoError(t, err)
+		entries, ok := res.([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, entries)
+
+		keyEntry := findByReason(entries, "key")
+		require.NotNil(t, keyEntry)
+		require.Equal(t, "(sanitized)", keyEntry["object"])
+		require.Empty(t, keyEntry["client-info"])
+
+		channelEntry := findByReason(entries, "channel")
+		require.NotNil(t, channelEntry)
+		require.Equal(t, "(sanitized)", channelEntry["object"])
+		require.Empty(t, channelEntry["client-info"])
+
+		require.NoError(t, admin.Do(ctx, "ACL", "LOG", "RESET").Err())
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "logsanitize", "skip-sanitize-payload").Err())
+		_ = sanitizedClient.Get(ctx, "secret:key").Err()
+		_ = sanitizedClient.Do(ctx, "PUBLISH", "secret:chan", "sensitive-message").Err()
+
+		res, err = admin.Do(ctx, "ACL", "LOG").Result()
+		require.NoError(t, err)
+		entries, ok = res.([]interface{})
+		require.True(t, ok)
+		require.NotEmpty(t, entries)
+
+		keyEntry = findByReason(entries, "key")
+		require.NotNil(t, keyEntry)
+		require.Equal(t, "secret:key", keyEntry["object"])
+		require.NotEmpty(t, keyEntry["client-info"])
+
+		channelEntry = findByReason(entries, "channel")
+		require.NotNil(t, channelEntry)
+		require.Equal(t, "secret:chan", channelEntry["object"])
+		require.NotEmpty(t, channelEntry["client-info"])
+
+		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "logsanitize").Err())
+	})
 }
 
 func TestACLLoadSave(t *testing.T) {
@@ -1295,8 +1387,7 @@ func TestACLLoadSave(t *testing.T) {
 		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "savetest").Err())
 
 		// Verify gone: GETUSER of a non-existent user returns nil array (redis.Nil from go-redis)
-		err := admin.Do(ctx, "ACL", "GETUSER", "savetest").Err()
-		require.ErrorIs(t, err, redis.Nil)
+		requireGetUserNotFound(t, ctx, admin, "savetest")
 
 		// Reload from file
 		res, err := admin.Do(ctx, "ACL", "LOAD").Result()
@@ -1307,6 +1398,51 @@ func TestACLLoadSave(t *testing.T) {
 		res, err = admin.Do(ctx, "ACL", "GETUSER", "savetest").Result()
 		require.NoError(t, err)
 		require.NotNil(t, res)
+	})
+
+	t.Run("LOAD is all-or-nothing when ACL file is invalid", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "rollbacktest", "on", ">p", "+get", "~*").Err())
+		rollbackClient := srv.NewClientWithOption(&redis.Options{Username: "rollbacktest", Password: "p", PoolSize: 1})
+		defer func() { require.NoError(t, rollbackClient.Close()) }()
+
+		_, err := rollbackClient.Get(ctx, "missing:key").Result()
+		require.ErrorIs(t, err, redis.Nil)
+
+		invalidACL := "user broken on >p +get ~*\nnot-a-user-line\n"
+		require.NoError(t, os.WriteFile(aclFile, []byte(invalidACL), 0o644))
+
+		err = admin.Do(ctx, "ACL", "LOAD").Err()
+		require.Error(t, err)
+
+		_, err = rollbackClient.Get(ctx, "missing:key").Result()
+		require.ErrorIs(t, err, redis.Nil)
+
+		requireGetUserNotFound(t, ctx, admin, "broken")
+
+		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "rollbacktest").Err())
+	})
+
+	t.Run("LOAD does not implicitly persist ACL changes", func(t *testing.T) {
+		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", "loadonly", "on", ">p", "+get", "~*").Err())
+		res, err := admin.Do(ctx, "ACL", "SAVE").Result()
+		require.NoError(t, err)
+		require.Equal(t, "OK", res)
+
+		require.NoError(t, admin.Do(ctx, "ACL", "DELUSER", "loadonly").Err())
+		requireGetUserNotFound(t, ctx, admin, "loadonly")
+
+		res, err = admin.Do(ctx, "ACL", "LOAD").Result()
+		require.NoError(t, err)
+		require.Equal(t, "OK", res)
+		res, err = admin.Do(ctx, "ACL", "GETUSER", "loadonly").Result()
+		require.NoError(t, err)
+		require.NotNil(t, res)
+
+		srv.Restart()
+
+		adminAfterRestart := srv.NewClient()
+		defer func() { require.NoError(t, adminAfterRestart.Close()) }()
+		requireGetUserNotFound(t, ctx, adminAfterRestart, "loadonly")
 	})
 }
 

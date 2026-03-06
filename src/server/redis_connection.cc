@@ -336,38 +336,45 @@ bool SelectorAllowsKey(const redis::AclSelector &selector, const std::string &ke
   return false;
 }
 
-bool SelectorAllowsKeys(const redis::AclSelector &selector, const CommandAttributes *attributes,
-                        const std::vector<std::string> &cmd_tokens, uint64_t cmd_flags) {
-  bool has_key = false;
-  bool denied = false;
-  const auto required_perm = CommandRequiredKeyPerm(cmd_flags);
-  attributes->ForEachKeyRange(
-      [&](const std::vector<std::string> &args, const redis::CommandKeyRange &key_range) {
-        key_range.ForEachKey(
-            [&](const std::string &key) {
-              has_key = true;
-              if (!SelectorAllowsKey(selector, key, required_perm)) {
-                denied = true;
-              }
-            },
-            args);
-      },
-      cmd_tokens, [](const auto &) {});
-  return !has_key || !denied;
+// Overload that uses a pre-extracted key list to avoid repeated ForEachKeyRange traversal
+// when iterating over multiple selectors.
+bool SelectorAllowsKeys(const redis::AclSelector &selector, const std::vector<std::string> &keys, bool has_key,
+                        uint32_t required_perm) {
+  if (!has_key) {
+    return true;
+  }
+  for (const auto &key : keys) {
+    if (!SelectorAllowsKey(selector, key, required_perm)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 enum class ChannelMatchMode { kGlob, kLiteral };
 
 enum class ChannelCommandMode { kNone, kGlob, kLiteral };
 
-ChannelCommandMode GetChannelCommandMode(std::string_view command) {
-  if (command == "publish" || command == "spublish" || command == "subscribe" || command == "ssubscribe") {
-    return ChannelCommandMode::kGlob;
+// Describes which arguments of a command are channel/pattern arguments.
+struct ChannelCommandInfo {
+  ChannelCommandMode mode = ChannelCommandMode::kNone;
+  // Exclusive upper bound on channel arg indices starting at 1.
+  // 0 means "all remaining args from index 1 are channels".
+  size_t channel_end = 0;
+};
+
+ChannelCommandInfo GetChannelCommandInfo(std::string_view command) {
+  if (command == "publish" || command == "spublish") {
+    // PUBLISH/SPUBLISH: channel message — only token[1] is the channel; token[2] is the message body.
+    return {ChannelCommandMode::kGlob, 2};
+  }
+  if (command == "subscribe" || command == "ssubscribe") {
+    return {ChannelCommandMode::kGlob, 0};
   }
   if (command == "psubscribe") {
-    return ChannelCommandMode::kLiteral;
+    return {ChannelCommandMode::kLiteral, 0};
   }
-  return ChannelCommandMode::kNone;
+  return {ChannelCommandMode::kNone, 0};
 }
 
 bool MatchSelectorChannel(const redis::AclSelector &selector, const std::string &channel, ChannelMatchMode mode) {
@@ -387,14 +394,17 @@ bool MatchSelectorChannel(const redis::AclSelector &selector, const std::string 
 }
 
 bool SelectorAllowsChannels(const redis::AclSelector &selector, const std::vector<std::string> &cmd_tokens,
-                            ChannelCommandMode mode) {
-  if (mode == ChannelCommandMode::kNone || cmd_tokens.size() <= 1) {
+                            const ChannelCommandInfo &info) {
+  if (info.mode == ChannelCommandMode::kNone || cmd_tokens.size() <= 1) {
     return true;
   }
 
-  const auto match_mode = mode == ChannelCommandMode::kLiteral ? ChannelMatchMode::kLiteral : ChannelMatchMode::kGlob;
+  const auto match_mode =
+      info.mode == ChannelCommandMode::kLiteral ? ChannelMatchMode::kLiteral : ChannelMatchMode::kGlob;
+  const size_t end =
+      (info.channel_end == 0 || info.channel_end > cmd_tokens.size()) ? cmd_tokens.size() : info.channel_end;
 
-  for (size_t i = 1; i < cmd_tokens.size(); ++i) {
+  for (size_t i = 1; i < end; ++i) {
     if (!MatchSelectorChannel(selector, cmd_tokens[i], match_mode)) {
       return false;
     }
@@ -441,10 +451,25 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
   }
 
   const auto &command = attributes->name;
-  const auto channel_mode = GetChannelCommandMode(command);
+  const auto channel_info = GetChannelCommandInfo(command);
 
   // Use cached bit index to avoid map lookup and lock on the hot path.
   auto cached_bit = attributes->GetOrResolveAclBit();
+
+  // Extract keys once before the selector loop to avoid repeated ForEachKeyRange traversal.
+  const auto required_perm = CommandRequiredKeyPerm(cmd_flags);
+  std::vector<std::string> keys;
+  bool has_key = false;
+  attributes->ForEachKeyRange(
+      [&](const std::vector<std::string> &args, const redis::CommandKeyRange &key_range) {
+        key_range.ForEachKey(
+            [&](const std::string &key) {
+              has_key = true;
+              keys.push_back(key);
+            },
+            args);
+      },
+      cmd_tokens, [](const auto &) {});
 
   // Determine the most specific deny reason across all selectors.
   // Priority: channel > key > command (higher specificity wins).
@@ -457,11 +482,11 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
                                             : mgr.IsCommandAllowed(selector.allowed_commands, command);
       if (!allowed) continue;
     }
-    if (!SelectorAllowsKeys(selector, attributes, cmd_tokens, cmd_flags)) {
+    if (!SelectorAllowsKeys(selector, keys, has_key, required_perm)) {
       any_key_denied = true;
       continue;
     }
-    if (!SelectorAllowsChannels(selector, cmd_tokens, channel_mode)) {
+    if (!SelectorAllowsChannels(selector, cmd_tokens, channel_info)) {
       any_channel_denied = true;
       continue;
     }
@@ -469,7 +494,7 @@ Status Connection::CheckAclCommandAllowed(Acl *acl, const CommandAttributes *att
     return Status::OK();
   }
 
-  AclDenyReason reason;
+  AclDenyReason reason = AclDenyReason::Command;
   std::string error_msg;
   if (any_channel_denied) {
     reason = AclDenyReason::Channel;
@@ -811,7 +836,12 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
           } else {
             object = util::ToLower(attributes->name);
           }
-          srv_->GetAcl()->GetAclLog().AddEntry(deny_reason, context, object, GetAclUsername(), ToString());
+          // When sanitize_payload is enabled (default), replace key/channel names with a
+          // placeholder to avoid leaking sensitive resource identifiers in the ACL log.
+          bool should_sanitize = !acl_user_ || acl_user_->sanitize_payload;
+          std::string log_object = (should_sanitize && deny_reason != AclDenyReason::Command) ? "(sanitized)" : object;
+          std::string client_info = should_sanitize ? "" : ToString();
+          srv_->GetAcl()->GetAclLog().AddEntry(deny_reason, context, log_object, GetAclUsername(), client_info);
         }
         Reply(redis::Error(acl_status));
         continue;

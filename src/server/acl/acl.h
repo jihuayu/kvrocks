@@ -23,6 +23,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -91,6 +92,7 @@ class Acl {
   void BumpVersion() { version_.fetch_add(1, std::memory_order_relaxed); }
 
   engine::Storage *storage_;
+  mutable std::shared_mutex manager_mu_;  // protects user_manager_ pointer swap
   std::unique_ptr<AclUserManager> user_manager_;
   std::atomic<uint64_t> version_{1};
   AclLog acl_log_;

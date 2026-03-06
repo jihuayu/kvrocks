@@ -195,6 +195,27 @@ bool AclCommandManager::IsCommandAllowedByBit(const std::vector<uint64_t> &bitma
 void AclCommandManager::Seal() {
   std::unique_lock<std::shared_mutex> lock(mu_);
   sealed_ = true;
+
+  // Pre-compute and cache the normalized all-commands bitmap so that hot-path
+  // callers (CommandBitmapIsAll, BuildCommandRules) avoid repeated allocation.
+  if (command_bits_.empty()) {
+    all_bitmap_sealed_ = {};
+    return;
+  }
+  size_t max_bit = 0;
+  for (const auto &[_, bit] : command_bits_) {
+    max_bit = std::max(max_bit, bit);
+  }
+  const size_t chunk_count = max_bit / 64 + 1;
+  std::vector<uint64_t> bitmap(chunk_count, 0);
+  for (const auto &[_, bit] : command_bits_) {
+    bitmap[bit / 64] |= (UINT64_C(1) << (bit % 64));
+  }
+  // Trim trailing zeros (normalize in-place).
+  while (!bitmap.empty() && bitmap.back() == 0) {
+    bitmap.pop_back();
+  }
+  all_bitmap_sealed_ = std::move(bitmap);
 }
 
 }  // namespace redis
