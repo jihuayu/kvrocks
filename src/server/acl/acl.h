@@ -22,8 +22,8 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
-#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -89,11 +89,14 @@ class Acl {
   Status SaveAclToFile(const std::string &path) const;
 
  private:
+  std::shared_ptr<AclUserManager> GetUserManagerSnapshot() const;
+  void StoreUserManager(std::shared_ptr<AclUserManager> user_manager);
   void BumpVersion() { version_.fetch_add(1, std::memory_order_relaxed); }
 
   engine::Storage *storage_;
-  mutable std::shared_mutex manager_mu_;  // protects user_manager_ pointer swap
-  std::unique_ptr<AclUserManager> user_manager_;
+  mutable std::mutex acl_op_mu_;         // serializes ACL management commands for Redis-compatible ordering
+  mutable std::mutex manager_write_mu_;  // serializes ACL cache mutations and manager snapshot swaps
+  std::shared_ptr<AclUserManager> user_manager_;
   std::atomic<uint64_t> version_{1};
   AclLog acl_log_;
 };

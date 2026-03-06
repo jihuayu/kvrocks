@@ -23,7 +23,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 
 #include "common/status.h"
 #include "test_base.h"
@@ -81,6 +84,13 @@ redis::AclUser BuildUserWithPasswords(const std::string &ns, const std::set<std:
 // Helper to check if a username exists in a list
 bool ContainsUsername(const std::vector<std::string> &users, const std::string &target) {
   return std::find(users.begin(), users.end(), target) != users.end();
+}
+
+uint32_t RootSelectorFlags(const std::shared_ptr<const redis::AclUser> &user) {
+  if (!user || user->allowed_commands.empty()) {
+    return 0;
+  }
+  return user->allowed_commands.front().flags;
 }
 
 }  // namespace
@@ -357,6 +367,41 @@ TEST_F(AclTest, UsernameMatchByIndexWithSlotReuse) {
   EXPECT_TRUE(acl->IsUsernameMatchedByIndex(second_index.value(), "slot_user_b"));
 }
 
+TEST_F(AclTest, HotPathLookupsFollowManagerSwap) {
+  auto acl = createAcl();
+  const auto first_user = BuildUser(true, "default", 1);
+  const auto second_user = BuildUser(true, "default", 7);
+
+  ASSERT_TRUE(acl->Set("slot_user_a", first_user).IsOK());
+  const auto file_a = (std::filesystem::path(config_.db_dir) / "acl-hot-path-a.conf").string();
+  ASSERT_TRUE(acl->SaveAclToFile(file_a).IsOK());
+
+  ASSERT_TRUE(acl->Del("slot_user_a").IsOK());
+  ASSERT_TRUE(acl->Set("slot_user_b", second_user).IsOK());
+  const auto file_b = (std::filesystem::path(config_.db_dir) / "acl-hot-path-b.conf").string();
+  ASSERT_TRUE(acl->SaveAclToFile(file_b).IsOK());
+
+  ASSERT_TRUE(acl->LoadAclFromFile(file_a).IsOK());
+  auto slot_index = acl->GetUserIndex("slot_user_a");
+  ASSERT_TRUE(slot_index.has_value());
+
+  auto first_snapshot = acl->GetCachedUserByIndex(*slot_index);
+  ASSERT_NE(nullptr, first_snapshot);
+  EXPECT_EQ(1U, RootSelectorFlags(first_snapshot));
+  EXPECT_TRUE(acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_a"));
+
+  ASSERT_TRUE(acl->LoadAclFromFile(file_b).IsOK());
+  auto second_snapshot = acl->GetCachedUserByIndex(*slot_index);
+  ASSERT_NE(nullptr, second_snapshot);
+  EXPECT_EQ(7U, RootSelectorFlags(second_snapshot));
+  EXPECT_FALSE(acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_a"));
+  EXPECT_TRUE(acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_b"));
+
+  auto second_index = acl->GetUserIndex("slot_user_b");
+  ASSERT_TRUE(second_index.has_value());
+  EXPECT_EQ(*slot_index, *second_index);
+}
+
 // ============================================================================
 // Serialization Tests
 // ============================================================================
@@ -402,6 +447,93 @@ TEST_F(AclTest, ConcurrentUserOperations) {
   ASSERT_TRUE(read2.IsOK());
   EXPECT_EQ("ns1", read1.GetValue().ns);
   EXPECT_EQ("ns2", read2.GetValue().ns);
+}
+
+TEST_F(AclTest, HotPathLookupsRemainConsistentAcrossConcurrentManagerReloads) {
+  auto acl = createAcl();
+  const auto first_user = BuildUser(true, "default", 1);
+  const auto second_user = BuildUser(true, "default", 7);
+
+  ASSERT_TRUE(acl->Set("slot_user_a", first_user).IsOK());
+  const auto file_a = (std::filesystem::path(config_.db_dir) / "acl-hot-path-race-a.conf").string();
+  ASSERT_TRUE(acl->SaveAclToFile(file_a).IsOK());
+
+  ASSERT_TRUE(acl->Del("slot_user_a").IsOK());
+  ASSERT_TRUE(acl->Set("slot_user_b", second_user).IsOK());
+  const auto file_b = (std::filesystem::path(config_.db_dir) / "acl-hot-path-race-b.conf").string();
+  ASSERT_TRUE(acl->SaveAclToFile(file_b).IsOK());
+
+  ASSERT_TRUE(acl->LoadAclFromFile(file_a).IsOK());
+  auto slot_index = acl->GetUserIndex("slot_user_a");
+  ASSERT_TRUE(slot_index.has_value());
+
+  std::atomic<bool> stop{false};
+  std::atomic<bool> failed{false};
+  std::atomic<int> stable_samples{0};
+  std::atomic<bool> saw_first_user{false};
+  std::atomic<bool> saw_second_user{false};
+  std::mutex failure_mu;
+  std::string failure_message;
+
+  auto record_failure = [&](std::string message) {
+    failed.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(failure_mu);
+    if (failure_message.empty()) {
+      failure_message = std::move(message);
+    }
+  };
+
+  std::thread reader([&] {
+    while (!stop.load(std::memory_order_relaxed) && !failed.load(std::memory_order_relaxed)) {
+      auto before_version = acl->GetVersion();
+      auto cached_user = acl->GetCachedUserByIndex(*slot_index);
+      auto matches_first = acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_a");
+      auto matches_second = acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_b");
+      auto after_version = acl->GetVersion();
+
+      if (before_version != after_version) {
+        continue;
+      }
+
+      stable_samples.fetch_add(1, std::memory_order_relaxed);
+      if (matches_first == matches_second) {
+        record_failure("expected exactly one ACL username match for a stable hot-path snapshot");
+        continue;
+      }
+      if (!cached_user) {
+        record_failure("expected ACL user data for a stable hot-path snapshot");
+        continue;
+      }
+
+      auto selector_flags = RootSelectorFlags(cached_user);
+      if (matches_first) {
+        saw_first_user.store(true, std::memory_order_relaxed);
+        if (selector_flags != 1U) {
+          record_failure("stable ACL snapshot returned mismatched user data for slot_user_a");
+        }
+      } else {
+        saw_second_user.store(true, std::memory_order_relaxed);
+        if (selector_flags != 7U) {
+          record_failure("stable ACL snapshot returned mismatched user data for slot_user_b");
+        }
+      }
+
+      std::this_thread::yield();
+    }
+  });
+
+  for (int i = 0; i < 200 && !failed.load(std::memory_order_relaxed); ++i) {
+    ASSERT_TRUE(acl->LoadAclFromFile((i % 2 == 0) ? file_b : file_a).IsOK());
+    std::this_thread::yield();
+  }
+
+  stop.store(true, std::memory_order_relaxed);
+  reader.join();
+
+  EXPECT_FALSE(failed.load(std::memory_order_relaxed)) << failure_message;
+  EXPECT_GT(stable_samples.load(std::memory_order_relaxed), 0);
+  EXPECT_TRUE(saw_first_user.load(std::memory_order_relaxed));
+  EXPECT_TRUE(saw_second_user.load(std::memory_order_relaxed));
 }
 
 // ============================================================================

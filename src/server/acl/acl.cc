@@ -29,7 +29,6 @@
 #include <exception>
 #include <fstream>
 #include <optional>
-#include <shared_mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -170,13 +169,11 @@ std::vector<std::string> BuildAclCategoriesReply() {
 }  // namespace
 
 StatusOr<AclUser> Acl::Get(const std::string &username) {
-  {
-    std::shared_lock lock(manager_mu_);
-    if (user_manager_) {
-      auto cached_user = user_manager_->GetUserByUserName(username);
-      if (cached_user) {
-        return *cached_user;
-      }
+  auto manager = GetUserManagerSnapshot();
+  if (manager) {
+    auto cached_user = manager->GetUserByUserName(username);
+    if (cached_user) {
+      return *cached_user;
     }
   }
 
@@ -207,10 +204,11 @@ StatusOr<AclUser> Acl::Get(const std::string &username) {
   AclUser result = user_or.GetValue();
   auto cache_entry = std::make_shared<const AclUser>(result);
   {
-    std::shared_lock lock(manager_mu_);
-    if (user_manager_) {
-      if (!user_manager_->AddUser(username, cache_entry)) {
-        user_manager_->SetUser(username, cache_entry);
+    std::lock_guard<std::mutex> lock(manager_write_mu_);
+    auto current_manager = GetUserManagerSnapshot();
+    if (current_manager && current_manager == manager) {
+      if (!current_manager->AddUser(username, cache_entry)) {
+        current_manager->SetUser(username, cache_entry);
       }
     }
   }
@@ -218,18 +216,29 @@ StatusOr<AclUser> Acl::Get(const std::string &username) {
   return result;
 }
 
+std::shared_ptr<AclUserManager> Acl::GetUserManagerSnapshot() const { return std::atomic_load(&user_manager_); }
+
+void Acl::StoreUserManager(std::shared_ptr<AclUserManager> user_manager) {
+  std::atomic_store(&user_manager_, std::move(user_manager));
+}
+
 Status Acl::Set(const std::string &username, const AclUser &user) {
-  std::shared_lock lock(manager_mu_);
-  auto previous = user_manager_->GetUserByUserName(username);
+  std::lock_guard<std::mutex> lock(manager_write_mu_);
+  auto manager = GetUserManagerSnapshot();
+  if (!manager) {
+    return {Status::NotOK, "ACL user cache is not initialized"};
+  }
+
+  auto previous = manager->GetUserByUserName(username);
   auto new_entry = std::make_shared<const AclUser>(user);
-  user_manager_->SetUser(username, new_entry);
+  manager->SetUser(username, new_entry);
 
   auto status = PersistAclUser(storage_, username, user);
   if (!status.IsOK()) {
     if (previous) {
-      user_manager_->SetUser(username, previous);
+      manager->SetUser(username, previous);
     } else {
-      user_manager_->DeleteUser(username);
+      manager->DeleteUser(username);
     }
     return status;
   }
@@ -240,19 +249,24 @@ Status Acl::Set(const std::string &username, const AclUser &user) {
 }
 
 Status Acl::Del(const std::string &username) {
-  std::shared_lock lock(manager_mu_);
-  auto existing = user_manager_->GetUserByUserName(username);
+  std::lock_guard<std::mutex> lock(manager_write_mu_);
+  auto manager = GetUserManagerSnapshot();
+  if (!manager) {
+    return {Status::NotOK, "the ACL user was not found"};
+  }
+
+  auto existing = manager->GetUserByUserName(username);
   if (!existing) {
     return {Status::NotOK, "the ACL user was not found"};
   }
 
-  if (!user_manager_->DeleteUser(username)) {
+  if (!manager->DeleteUser(username)) {
     return {Status::NotOK, "the ACL user was not found"};
   }
 
   auto status = RemoveAclUser(storage_, username);
   if (!status.IsOK()) {
-    user_manager_->SetUser(username, existing);
+    manager->SetUser(username, existing);
     return status;
   }
 
@@ -262,6 +276,7 @@ Status Acl::Del(const std::string &username) {
 }
 
 Status Acl::LoadAcl() {
+  std::lock_guard<std::mutex> write_lock(manager_write_mu_);
   AclCommandManager::Instance().Seal();
 
   std::vector<std::pair<std::string, std::shared_ptr<const AclUser>>> loaded_users;
@@ -301,79 +316,77 @@ Status Acl::LoadAcl() {
     return {Status::NotOK, iter->status().ToString()};
   }
 
-  auto new_manager = std::make_unique<AclUserManager>();
+  auto new_manager = std::make_shared<AclUserManager>();
   for (auto &entry : loaded_users) {
     if (!new_manager->AddUser(entry.first, entry.second)) {
       return {Status::NotOK, "failed to populate ACL user cache"};
     }
   }
 
-  {
-    std::unique_lock lock(manager_mu_);
-    user_manager_ = std::move(new_manager);
-    BumpVersion();
-  }
+  StoreUserManager(std::move(new_manager));
+  BumpVersion();
   return Status::OK();
 }
 
 std::optional<size_t> Acl::GetUserIndex(const std::string &username) {
-  std::shared_lock lock(manager_mu_);
-  if (!user_manager_) {
+  auto manager = GetUserManagerSnapshot();
+  if (!manager) {
     return std::nullopt;
   }
-  return user_manager_->GetUserIndex(username);
+  return manager->GetUserIndex(username);
 }
 
 std::optional<AclUserManager::IndexedUser> Acl::GetIndexedUserByUsername(const std::string &username) {
-  std::shared_lock lock(manager_mu_);
-  if (!user_manager_) {
+  auto manager = GetUserManagerSnapshot();
+  if (!manager) {
     return std::nullopt;
   }
-  return user_manager_->GetIndexedUserByUsername(username);
+  return manager->GetIndexedUserByUsername(username);
 }
 
 std::shared_ptr<const AclUser> Acl::GetCachedUserByIndex(size_t index) {
-  std::shared_lock lock(manager_mu_);
-  if (!user_manager_) {
+  auto manager = GetUserManagerSnapshot();
+  if (!manager) {
     return nullptr;
   }
-  return user_manager_->GetUserByIndex(index);
+  return manager->GetUserByIndex(index);
 }
 
 std::shared_ptr<const AclUser> Acl::GetUserByUsername(const std::string &username) const {
-  std::shared_lock lock(manager_mu_);
-  if (!user_manager_) {
+  auto manager = GetUserManagerSnapshot();
+  if (!manager) {
     return nullptr;
   }
-  return user_manager_->GetUserByUserName(username);
+  return manager->GetUserByUserName(username);
 }
 
 std::vector<std::string> Acl::ListUsers() const {
-  std::shared_lock lock(manager_mu_);
-  if (!user_manager_) {
+  auto manager = GetUserManagerSnapshot();
+  if (!manager) {
     return {};
   }
-  return user_manager_->ListUsernames();
+  return manager->ListUsernames();
 }
 
 std::optional<std::string> Acl::GetUsernameByIndex(size_t index) const {
-  std::shared_lock lock(manager_mu_);
-  if (!user_manager_) {
+  auto manager = GetUserManagerSnapshot();
+  if (!manager) {
     return std::nullopt;
   }
-  return user_manager_->GetUsernameByIndex(index);
+  return manager->GetUsernameByIndex(index);
 }
 
 bool Acl::IsUsernameMatchedByIndex(size_t index, const std::string &username) const {
-  std::shared_lock lock(manager_mu_);
-  if (!user_manager_) {
+  auto manager = GetUserManagerSnapshot();
+  if (!manager) {
     return false;
   }
-  return user_manager_->IsUsernameMatchedByIndex(index, username);
+  return manager->IsUsernameMatchedByIndex(index, username);
 }
 
 Status Acl::HandleSetUser(Namespace *ns_mgr, const std::string &username, const std::vector<std::string> &modifiers,
                           std::string *output, bool strict_namespace) {
+  std::lock_guard<std::mutex> op_lock(acl_op_mu_);
   if (username.empty()) {
     return {Status::RedisParseErr, errWrongNumOfArguments};
   }
@@ -468,13 +481,17 @@ Status Acl::HandleUsers(Connection *conn, std::string *output) const {
 }
 
 Status Acl::HandleList(Connection *conn, std::string *output) const {
-  auto names = ListUsers();
   std::vector<std::string> entries;
-  entries.reserve(names.size());
+  auto manager = GetUserManagerSnapshot();
+  if (!manager) {
+    *output = conn->MultiBulkString(entries);
+    return Status::OK();
+  }
 
-  std::shared_lock lock(manager_mu_);
+  auto names = manager->ListUsernames();
+  entries.reserve(names.size());
   for (const auto &name : names) {
-    auto user = user_manager_ ? user_manager_->GetUserByUserName(name) : nullptr;
+    auto user = manager->GetUserByUserName(name);
     if (!user) {
       continue;
     }
@@ -508,6 +525,7 @@ Status Acl::HandleCat(Connection *conn, const std::optional<std::string> &catego
 
 Status Acl::HandleDelUser(const std::vector<std::string> &usernames, std::vector<std::string> *deleted_usernames,
                           std::string *output) {
+  std::lock_guard<std::mutex> op_lock(acl_op_mu_);
   if (usernames.empty()) {
     return {Status::RedisParseErr, errWrongNumOfArguments};
   }
@@ -593,6 +611,7 @@ Status Acl::HandleDryRun(Connection *conn, const std::string &username, const st
 }
 
 Status Acl::ApplyReplicatedUpdate(const std::string &username, const std::string &value) {
+  std::lock_guard<std::mutex> op_lock(acl_op_mu_);
   jsoncons::json parsed;
   try {
     parsed = jsoncons::json::parse(value);
@@ -607,9 +626,10 @@ Status Acl::ApplyReplicatedUpdate(const std::string &username, const std::string
 
   auto new_entry = std::make_shared<const AclUser>(user_or.GetValue());
   {
-    std::shared_lock lock(manager_mu_);
-    if (user_manager_) {
-      user_manager_->SetUser(username, new_entry);
+    std::lock_guard<std::mutex> lock(manager_write_mu_);
+    auto manager = GetUserManagerSnapshot();
+    if (manager) {
+      manager->SetUser(username, new_entry);
     }
   }
   BumpVersion();
@@ -618,9 +638,11 @@ Status Acl::ApplyReplicatedUpdate(const std::string &username, const std::string
 }
 
 Status Acl::ApplyReplicatedDeletion(const std::string &username) {
+  std::lock_guard<std::mutex> op_lock(acl_op_mu_);
   {
-    std::shared_lock lock(manager_mu_);
-    if (!user_manager_ || !user_manager_->DeleteUser(username)) {
+    std::lock_guard<std::mutex> lock(manager_write_mu_);
+    auto manager = GetUserManagerSnapshot();
+    if (!manager || !manager->DeleteUser(username)) {
       // User might not exist in cache, which is okay for replication
       return Status::OK();
     }
@@ -630,6 +652,7 @@ Status Acl::ApplyReplicatedDeletion(const std::string &username) {
 }
 
 Status Acl::LoadAclFromFile(const std::string &path, Namespace *ns_mgr, bool strict_namespace) {
+  std::lock_guard<std::mutex> op_lock(acl_op_mu_);
   std::ifstream file(path);
   if (!file.is_open()) {
     return {Status::NotOK, "Failed to open ACL file: " + path};
@@ -713,13 +736,13 @@ Status Acl::LoadAclFromFile(const std::string &path, Namespace *ns_mgr, bool str
   }
 
   // Phase 3: Atomically swap the in-memory user manager with the staged state.
-  auto new_manager = std::make_unique<AclUserManager>();
+  auto new_manager = std::make_shared<AclUserManager>();
   for (const auto &entry : staged_users) {
     new_manager->AddUser(entry.first, std::make_shared<const AclUser>(entry.second));
   }
   {
-    std::unique_lock lock(manager_mu_);
-    user_manager_ = std::move(new_manager);
+    std::lock_guard<std::mutex> lock(manager_write_mu_);
+    StoreUserManager(std::move(new_manager));
     BumpVersion();
   }
 
@@ -727,6 +750,7 @@ Status Acl::LoadAclFromFile(const std::string &path, Namespace *ns_mgr, bool str
 }
 
 Status Acl::SaveAclToFile(const std::string &path) const {
+  std::lock_guard<std::mutex> op_lock(acl_op_mu_);
   // Write to a temporary file then rename for atomicity.
   std::string tmp_path = path + ".tmp";
   std::ofstream file(tmp_path);
@@ -734,10 +758,22 @@ Status Acl::SaveAclToFile(const std::string &path) const {
     return {Status::NotOK, "Failed to open ACL temp file for writing: " + tmp_path};
   }
 
-  auto names = ListUsers();
-  std::shared_lock lock(manager_mu_);
+  auto manager = GetUserManagerSnapshot();
+  if (!manager) {
+    file.close();
+    if (!file) {
+      return {Status::NotOK, "Error flushing ACL file"};
+    }
+    if (rename(tmp_path.c_str(), path.c_str()) != 0) {
+      return {Status::NotOK,
+              fmt::format("Failed to rename ACL temp file '{}' to '{}': {}", tmp_path, path, strerror(errno))};
+    }
+    return Status::OK();
+  }
+
+  auto names = manager->ListUsernames();
   for (const auto &name : names) {
-    auto user = user_manager_ ? user_manager_->GetUserByUserName(name) : nullptr;
+    auto user = manager->GetUserByUserName(name);
     if (!user) continue;
     file << BuildAclListEntry(name, *user) << "\n";
     if (!file) {

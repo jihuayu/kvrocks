@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1808,4 +1809,52 @@ func TestACLClusterAllNodesMode(t *testing.T) {
 		err := admin.Do(ctx, "ACL", "SETUSER", "standaloneuser", "on").Err()
 		require.NoError(t, err)
 	})
+}
+
+func TestACLLoadSerializesSetUser(t *testing.T) {
+	aclFile := t.TempDir() + "/blocked.acl"
+	require.NoError(t, syscall.Mkfifo(aclFile, 0o644))
+
+	srv := util.StartServer(t, map[string]string{
+		"acl-preview-enabled": "yes",
+		"aclfile":             aclFile,
+	})
+	defer srv.Close()
+
+	ctx := context.Background()
+	loadClient := srv.NewClient()
+	defer func() { require.NoError(t, loadClient.Close()) }()
+	setClient := srv.NewClient()
+	defer func() { require.NoError(t, setClient.Close()) }()
+
+	loadDone := make(chan error, 1)
+	go func() {
+		loadDone <- loadClient.Do(ctx, "ACL", "LOAD").Err()
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	setDone := make(chan error, 1)
+	go func() {
+		setDone <- setClient.Do(ctx, "ACL", "SETUSER", "serialized", "on", ">p", "+get", "~*").Err()
+	}()
+
+	select {
+	case err := <-setDone:
+		require.Failf(t, "ACL SETUSER returned before ACL LOAD completed", "unexpected result: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	writer, err := os.OpenFile(aclFile, os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = writer.WriteString("user default on nopass +@all ~* &*\n")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	require.NoError(t, <-loadDone)
+	require.NoError(t, <-setDone)
+
+	result, err := setClient.Do(ctx, "ACL", "GETUSER", "serialized").Result()
+	require.NoError(t, err)
+	require.NotNil(t, result)
 }
