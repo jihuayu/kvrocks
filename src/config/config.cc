@@ -549,8 +549,9 @@ void Config::initFieldCallback() {
                if (attributes == nullptr) {
                  return {Status::NotOK, cmd + " is not Kvrocks supported command"};
                }
-               // profiling_sample_commands use the original command name, or canonical root|sub names for
-               // registered subcommands, regardless of rename-command directive.
+               // profiling_sample_commands use original top-level command names, or canonical
+               // root|sub names for registered subcommands, regardless of the rename-command
+               // directive.
                profiling_sample_commands.insert(attributes->name);
              }
              return Status::OK();

@@ -111,7 +111,6 @@ TEST(Config, GetAndSet) {
     EXPECT_EQ(values[1], iter.second);
   }
   unlink(path);
-
   std::map<std::string, std::string> immutable_cases = {
       {"daemonize", "yes"},
       {"bind", "0.0.0.0"},
@@ -220,6 +219,15 @@ TEST(Config, DumpConfigLine) {
   ASSERT_EQ(DumpConfigLine({"a", "x y"}), "a \"x y\"");
   ASSERT_EQ(DumpConfigLine({"a", "xy"}), "a xy");
   ASSERT_EQ(DumpConfigLine({"a", "x\n"}), "a \"x\\n\"");
+}
+
+TEST(Config, ProfilingSampleCommandsSupportsSubcommandNames) {
+  Config config;
+
+  auto s = config.Set(nullptr, "profiling-sample-commands", "namespace|add,namespace");
+  ASSERT_TRUE(s.IsOK());
+  EXPECT_FALSE(config.profiling_sample_all_commands);
+  EXPECT_EQ(config.profiling_sample_commands, (std::set<std::string>{"namespace", "namespace|add"}));
 }
 
 TEST(Config, DisableL0Slowdown) {
