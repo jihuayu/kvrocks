@@ -539,20 +539,22 @@ void Config::initFieldCallback() {
              std::vector<std::string> cmds = util::Split(v, ",");
              profiling_sample_all_commands = false;
              profiling_sample_commands.clear();
-             for (auto const &cmd : cmds) {
-               if (cmd == "*") {
-                 profiling_sample_all_commands = true;
-                 profiling_sample_commands.clear();
-                 return Status::OK();
-               }
-               if (!redis::CommandTable::IsExists(cmd)) {
-                 return {Status::NotOK, cmd + " is not Kvrocks supported command"};
-               }
-               // profiling_sample_commands use command's original name, regardless of rename-command directive
-               profiling_sample_commands.insert(cmd);
-             }
-             return Status::OK();
-           }},
+              for (auto const &cmd : cmds) {
+                if (cmd == "*") {
+                  profiling_sample_all_commands = true;
+                  profiling_sample_commands.clear();
+                  return Status::OK();
+                }
+                auto *attributes = redis::CommandTable::LookupAttributesByName(cmd);
+                if (attributes == nullptr) {
+                  return {Status::NotOK, cmd + " is not Kvrocks supported command"};
+                }
+                // profiling_sample_commands use the original command name, or canonical root|sub names for
+                // registered subcommands, regardless of rename-command directive.
+                profiling_sample_commands.insert(attributes->name);
+              }
+              return Status::OK();
+            }},
           {"slowlog-max-len",
            [this](Server *srv, [[maybe_unused]] const std::string &k, [[maybe_unused]] const std::string &v) -> Status {
              if (!srv) return Status::OK();

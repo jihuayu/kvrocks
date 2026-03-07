@@ -377,4 +377,26 @@ REDIS_REGISTER_COMMANDS(Cluster,
                         MakeCmdAttr<CommandReadWrite>("readwrite", 1, "no-multi", NO_KEY),
                         MakeCmdAttr<CommandAsking>("asking", 1, "", NO_KEY), )
 
+REDIS_REGISTER_SUBCOMMANDS(Cluster, "cluster", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandCluster>("cluster", "nodes", 2, "no-script admin", NO_KEY),
+                           MakeSubCmdAttr<CommandCluster>("cluster", "slots", 2, "no-script admin", NO_KEY),
+                           MakeSubCmdAttr<CommandCluster>("cluster", "info", 2, "no-script admin", NO_KEY),
+                           MakeSubCmdAttr<CommandCluster>("cluster", "reset", -2, "no-script admin exclusive", NO_KEY),
+                           MakeSubCmdAttr<CommandCluster>("cluster", "keyslot", 3, "no-script admin", 2, 2, 1),
+                           MakeSubCmdAttr<CommandCluster>("cluster", "import", 4, "no-script admin exclusive", NO_KEY),
+                           MakeSubCmdAttr<CommandCluster>("cluster", "replicas", 3, "no-script admin", NO_KEY))
+
+REDIS_REGISTER_SUBCOMMANDS(Cluster, "clusterx", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandClusterX>("clusterx", "version", 2, "no-script admin", NO_KEY),
+                           MakeSubCmdAttr<CommandClusterX>("clusterx", "myid", 2, "no-script admin", NO_KEY),
+                           MakeSubCmdAttr<CommandClusterX>("clusterx", "setnodeid", 3, "no-script admin exclusive",
+                                                           NO_KEY),
+                           MakeSubCmdAttr<CommandClusterX>("clusterx", "migrate", -4, "no-script admin", NO_KEY),
+                           MakeSubCmdAttr<CommandClusterX>("clusterx", "setnodes", -4, "no-script admin exclusive",
+                                                           NO_KEY),
+                           MakeSubCmdAttr<CommandClusterX>("clusterx", "setslot", 6, "no-script admin exclusive",
+                                                           NO_KEY),
+                           MakeSubCmdAttr<CommandClusterX>("clusterx", "flushslots", 3, "no-script admin exclusive",
+                                                           NO_KEY))
+
 }  // namespace redis

@@ -113,7 +113,8 @@ struct CommandFCall : Commander {
 CommandKeyRange GetScriptEvalKeyRange(const std::vector<std::string> &args);
 
 uint64_t GenerateFunctionFlags(uint64_t flags, const std::vector<std::string> &args) {
-  if (args.size() >= 2 && (util::EqualICase(args[1], "load") || util::EqualICase(args[1], "delete"))) {
+  if (args.size() >= 2 &&
+      (util::EqualICase(args[1], "load") || util::EqualICase(args[1], "delete") || util::EqualICase(args[1], "flush"))) {
     return flags | kCmdWrite;
   }
 
@@ -132,5 +133,14 @@ REDIS_REGISTER_COMMANDS(
     Function, MakeCmdAttr<CommandFunction>("function", -2, "exclusive no-script", NO_KEY, GenerateFunctionFlags),
     MakeCmdAttr<CommandFCall<>>("fcall", -3, "write no-script skip-monitor", GetScriptEvalKeyRange, GenerateFCallFlags),
     MakeCmdAttr<CommandFCall<true>>("fcall_ro", -3, "read-only no-script skip-monitor", GetScriptEvalKeyRange));
+
+REDIS_REGISTER_SUBCOMMANDS(
+    Function, "function", MakeArgIndexSubcommandResolver(1),
+    MakeSubCmdAttr<CommandFunction>("function", "load", -3, "write exclusive no-script", NO_KEY),
+    MakeSubCmdAttr<CommandFunction>("function", "list", -2, "read-only exclusive no-script", NO_KEY),
+    MakeSubCmdAttr<CommandFunction>("function", "listfunc", -2, "read-only exclusive no-script", NO_KEY),
+    MakeSubCmdAttr<CommandFunction>("function", "listlib", -3, "read-only exclusive no-script", NO_KEY),
+    MakeSubCmdAttr<CommandFunction>("function", "delete", -3, "write exclusive no-script", NO_KEY),
+    MakeSubCmdAttr<CommandFunction>("function", "flush", -2, "write exclusive no-script", NO_KEY))
 
 }  // namespace redis

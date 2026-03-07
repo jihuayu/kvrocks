@@ -72,15 +72,79 @@ void CommandTable::GetAllCommandsInfo(std::string *info) {
 void CommandTable::GetCommandsInfo(std::string *info, const std::vector<std::string> &cmd_names) {
   info->append(redis::MultiLen(cmd_names.size()));
   for (const auto &cmd_name : cmd_names) {
-    auto cmd_iter = commands.find(util::ToLower(cmd_name));
-    if (cmd_iter == commands.end()) {
+    auto command_attribute = LookupAttributesByName(cmd_name);
+    if (command_attribute == nullptr) {
       info->append(NilString(RESP::v2));
     } else {
-      auto command_attribute = cmd_iter->second;
       auto command_info = GetCommandInfo(command_attribute);
       info->append(command_info);
     }
   }
+}
+
+const CommandAttributes *CommandTable::LookupAttributesByName(const std::string &name) {
+  auto lower_name = util::ToLower(name);
+  auto cmd_iter = commands.find(lower_name);
+  if (cmd_iter != commands.end()) {
+    return cmd_iter->second;
+  }
+
+  auto separator = lower_name.find('|');
+  if (separator == std::string::npos) {
+    return nullptr;
+  }
+
+  auto root = lower_name.substr(0, separator);
+  auto sub = lower_name.substr(separator + 1);
+  if (sub.empty()) {
+    return nullptr;
+  }
+
+  const CommandAttributes *root_attributes = nullptr;
+  if (auto root_iter = original_commands.find(root); root_iter != original_commands.end()) {
+    root_attributes = root_iter->second;
+  } else if (auto root_iter = commands.find(root); root_iter != commands.end()) {
+    root_attributes = root_iter->second;
+  }
+
+  if (root_attributes == nullptr) {
+    return nullptr;
+  }
+
+  return SubcommandRegistry::LookupSubcommand(root_attributes->name, sub);
+}
+
+StatusOr<ResolvedCommand> CommandTable::Resolve(const std::vector<std::string> &cmd_tokens) {
+  if (cmd_tokens.empty()) {
+    return {Status::RedisUnknownCmd};
+  }
+
+  auto cmd_iter = commands.find(util::ToLower(cmd_tokens.front()));
+  if (cmd_iter == commands.end()) {
+    return {Status::RedisUnknownCmd};
+  }
+
+  const auto *root_attributes = cmd_iter->second;
+  ResolvedCommand resolved{root_attributes->name, std::nullopt, root_attributes};
+
+  auto family = SubcommandRegistry::GetFamily(root_attributes->name);
+  if (family == nullptr || !family->resolver) {
+    return resolved;
+  }
+
+  auto subcommand = family->resolver(cmd_tokens);
+  if (!subcommand) {
+    return resolved;
+  }
+
+  auto subcommand_attributes = SubcommandRegistry::LookupSubcommand(root_attributes->name, *subcommand);
+  if (subcommand_attributes == nullptr) {
+    return {Status::RedisInvalidCmd, errUnknownSubcommandOrWrongArguments};
+  }
+
+  resolved.sub = std::move(subcommand);
+  resolved.attributes = subcommand_attributes;
+  return resolved;
 }
 
 StatusOr<std::vector<int>> CommandTable::GetKeysFromCommand(const CommandAttributes *attributes,
@@ -92,7 +156,9 @@ StatusOr<std::vector<int>> CommandTable::GetKeysFromCommand(const CommandAttribu
   }
 
   auto cmd = attributes->factory();
-  if (auto s = cmd->Parse(cmd_tokens); !s) {
+  cmd->SetAttributes(attributes);
+  cmd->SetArgs(cmd_tokens);
+  if (auto s = cmd->Parse(); !s) {
     return {Status::NotOK, "Invalid syntax found in this command arguments: " + s.Msg()};
   }
 
@@ -112,8 +178,13 @@ StatusOr<std::vector<int>> CommandTable::GetKeysFromCommand(const CommandAttribu
   return key_indexes;
 }
 
+StatusOr<std::vector<int>> CommandTable::GetKeysFromCommand(const std::vector<std::string> &cmd_tokens) {
+  auto resolved = GET_OR_RET(Resolve(cmd_tokens));
+  return GetKeysFromCommand(resolved.attributes, cmd_tokens);
+}
+
 bool CommandTable::IsExists(const std::string &name) {
-  return original_commands.find(util::ToLower(name)) != original_commands.end();
+  return LookupAttributesByName(name) != nullptr;
 }
 
 Status CommandTable::ParseSlotRanges(const std::string &slots_str, std::vector<SlotRange> &slots) {

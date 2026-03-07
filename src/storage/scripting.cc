@@ -784,14 +784,20 @@ int RedisGenericCommand(lua_State *lua, int raise_error) {
     }
   }
 
-  auto cmd_s = Server::LookupAndCreateCommand(args[0]);
+  auto cmd_s = Server::LookupAndCreateCommand(args);
   if (!cmd_s) {
-    PushError(lua, "Unknown Redis command called from Lua script");
+    if (cmd_s.Is<Status::RedisUnknownCmd>()) {
+      PushError(lua, "Unknown Redis command called from Lua script");
+    } else {
+      auto err = cmd_s.Msg();
+      PushError(lua, err.c_str());
+    }
     return raise_error ? RaiseError(lua) : 1;
   }
   auto cmd = *std::move(cmd_s);
 
   auto attributes = cmd->GetAttributes();
+  const auto &resolved_cmd = cmd->GetResolvedCommand();
   if (!attributes->CheckArity(argc)) {
     PushError(lua, "Wrong number of args while calling Redis command from Lua script");
     return raise_error ? RaiseError(lua) : 1;
@@ -813,7 +819,6 @@ int RedisGenericCommand(lua_State *lua, int raise_error) {
     return raise_error ? RaiseError(lua) : 1;
   }
 
-  std::string cmd_name = attributes->name;
   cmd->SetArgs(args);
   auto s = cmd->Parse();
   if (!s) {
@@ -869,7 +874,8 @@ int RedisGenericCommand(lua_State *lua, int raise_error) {
     return raise_error ? RaiseError(lua) : 1;
   }
 
-  if (!config->slave_serve_stale_data && srv->IsSlave() && cmd_name != "info" && cmd_name != "slaveof" &&
+  if (!config->slave_serve_stale_data && srv->IsSlave() && resolved_cmd.root != "info" &&
+      resolved_cmd.root != "slaveof" && resolved_cmd.root != "config" &&
       srv->GetReplicationState() != kReplConnected) {
     PushError(lua,
               "MASTERDOWN Link with MASTER is down "
@@ -878,7 +884,7 @@ int RedisGenericCommand(lua_State *lua, int raise_error) {
   }
 
   std::string output;
-  s = conn->ExecuteCommand(*script_run_ctx->ctx, cmd_name, args, cmd.get(), &output);
+  s = conn->ExecuteCommand(*script_run_ctx->ctx, resolved_cmd, args, cmd.get(), &output);
   if (!s) {
     PushError(lua, s.Msg().data());
     return raise_error ? RaiseError(lua) : 1;

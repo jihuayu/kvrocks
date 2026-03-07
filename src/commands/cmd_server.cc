@@ -829,13 +829,8 @@ class CommandCommand : public Commander {
       } else if (sub_command == "info") {
         CommandTable::GetCommandsInfo(output, std::vector<std::string>(args_.begin() + 2, args_.end()));
       } else if (sub_command == "getkeys") {
-        auto cmd_iter = CommandTable::GetOriginal()->find(util::ToLower(args_[2]));
-        if (cmd_iter == CommandTable::GetOriginal()->end()) {
-          return {Status::RedisUnknownCmd, "Invalid command specified"};
-        }
-
-        auto key_indexes = GET_OR_RET(CommandTable::GetKeysFromCommand(
-            cmd_iter->second, std::vector<std::string>(args_.begin() + 2, args_.end())));
+        auto command_tokens = std::vector<std::string>(args_.begin() + 2, args_.end());
+        auto key_indexes = GET_OR_RET(CommandTable::GetKeysFromCommand(command_tokens));
 
         if (key_indexes.size() == 0) {
           return {Status::RedisExecErr, "Invalid arguments specified for command"};
@@ -1671,4 +1666,61 @@ REDIS_REGISTER_COMMANDS(
     MakeCmdAttr<CommandSST>("sst", -3, "write exclusive admin", 1, 1, 1),
     MakeCmdAttr<CommandFlushMemTable>("flushmemtable", -1, "exclusive write", NO_KEY),
     MakeCmdAttr<CommandFlushBlockCache>("flushblockcache", 1, "exclusive write", NO_KEY), )
+
+REDIS_REGISTER_SUBCOMMANDS(Server, "command", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandCommand>("command", "count", 2, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandCommand>("command", "info", -3, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandCommand>("command", "getkeys", -3, "read-only", NO_KEY))
+
+REDIS_REGISTER_SUBCOMMANDS(Server, "config", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandConfig>("config", "get", 3, "read-only admin skip-monitor", NO_KEY),
+                           MakeSubCmdAttr<CommandConfig>("config", "set", 4,
+                                                         "read-only admin skip-monitor exclusive", NO_KEY),
+                           MakeSubCmdAttr<CommandConfig>("config", "rewrite", 2, "read-only admin skip-monitor",
+                                                         NO_KEY))
+
+REDIS_REGISTER_SUBCOMMANDS(Server, "namespace", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandNamespace>("namespace", "get", 3, "read-only admin skip-monitor",
+                                                            NO_KEY),
+                           MakeSubCmdAttr<CommandNamespace>("namespace", "set", 4, "read-only admin skip-monitor",
+                                                            NO_KEY),
+                           MakeSubCmdAttr<CommandNamespace>("namespace", "add", 4, "read-only admin skip-monitor",
+                                                            NO_KEY),
+                           MakeSubCmdAttr<CommandNamespace>("namespace", "del", 3, "read-only admin skip-monitor",
+                                                            NO_KEY),
+                           MakeSubCmdAttr<CommandNamespace>("namespace", "current", 2, "read-only skip-monitor",
+                                                            NO_KEY))
+
+REDIS_REGISTER_SUBCOMMANDS(Server, "perflog", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandPerfLog>("perflog", "reset", -2, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandPerfLog>("perflog", "len", -2, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandPerfLog>("perflog", "get", -2, "read-only", NO_KEY))
+
+REDIS_REGISTER_SUBCOMMANDS(Server, "slowlog", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandSlowlog>("slowlog", "reset", -2, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandSlowlog>("slowlog", "len", -2, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandSlowlog>("slowlog", "get", -2, "read-only", NO_KEY))
+
+REDIS_REGISTER_SUBCOMMANDS(Server, "client", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandClient>("client", "id", 2, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandClient>("client", "getname", 2, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandClient>("client", "list", 2, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandClient>("client", "info", 2, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandClient>("client", "setname", 3, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandClient>("client", "reply", 3, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandClient>("client", "pause", -3, "read-only admin", NO_KEY),
+                           MakeSubCmdAttr<CommandClient>("client", "unpause", 2, "read-only admin", NO_KEY),
+                           MakeSubCmdAttr<CommandClient>("client", "kill", -3, "read-only", NO_KEY))
+
+REDIS_REGISTER_SUBCOMMANDS(Server, "debug", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandDebug>("debug", "sleep", 3, "read-only exclusive", NO_KEY),
+                           MakeSubCmdAttr<CommandDebug>("debug", "protocol", 3, "read-only", NO_KEY),
+                           MakeSubCmdAttr<CommandDebug>("debug", "dbsize-limit", 3, "read-only exclusive", NO_KEY))
+
+REDIS_REGISTER_SUBCOMMANDS(Server, "disk", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandDisk>("disk", "usage", 3, "read-only", 2, 2, 1))
+
+REDIS_REGISTER_SUBCOMMANDS(Server, "memory", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandMemory>("memory", "usage", 3, "read-only", 2, 2, 1))
+
 }  // namespace redis

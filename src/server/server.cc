@@ -68,18 +68,29 @@ Server::Server(engine::Storage *storage, Config *config)
   // init commands stats here to prevent concurrent insert, and cause core
   auto commands = redis::CommandTable::GetOriginal();
 
-  for (const auto &iter : *commands) {
-    stats.commands_stats[iter.first].calls = 0;
-    stats.commands_stats[iter.first].latency = 0;
+  auto init_command_stats = [this](const std::string &command_name) {
+    stats.commands_stats[command_name].calls = 0;
+    stats.commands_stats[command_name].latency = 0;
 
     if (stats.bucket_boundaries.size() > 0) {
-      // NB: Extra index for the last bucket (Inf)
-      for (std::size_t i{0}; i <= stats.bucket_boundaries.size(); ++i) {
-        stats.commands_histogram[iter.first].buckets.push_back(std::make_unique<std::atomic<uint64_t>>(0));
+      auto &histogram = stats.commands_histogram[command_name];
+      if (histogram.buckets.empty()) {
+        // NB: Extra index for the last bucket (Inf)
+        for (std::size_t i{0}; i <= stats.bucket_boundaries.size(); ++i) {
+          histogram.buckets.push_back(std::make_unique<std::atomic<uint64_t>>(0));
+        }
       }
-      stats.commands_histogram[iter.first].calls = 0;
-      stats.commands_histogram[iter.first].sum = 0;
+      histogram.calls = 0;
+      histogram.sum = 0;
     }
+  };
+
+  for (const auto &iter : *commands) {
+    init_command_stats(iter.first);
+  }
+
+  for (const auto *attr : redis::SubcommandRegistry::GetAll()) {
+    init_command_stats(attr->name);
   }
 
   // init cursor_dict_
@@ -1863,20 +1874,22 @@ ReplState Server::GetReplicationState() {
   return kReplConnecting;
 }
 
-StatusOr<std::unique_ptr<redis::Commander>> Server::LookupAndCreateCommand(const std::string &cmd_name) {
-  if (cmd_name.empty()) return {Status::RedisUnknownCmd};
+StatusOr<std::unique_ptr<redis::Commander>> Server::LookupAndCreateCommand(const std::vector<std::string> &cmd_tokens) {
+  auto resolved = GET_OR_RET(redis::CommandTable::Resolve(cmd_tokens));
 
-  auto commands = redis::CommandTable::Get();
-  auto cmd_iter = commands->find(util::ToLower(cmd_name));
-  if (cmd_iter == commands->end()) {
+  auto cmd = resolved.attributes->factory();
+  cmd->SetAttributes(resolved.attributes);
+  cmd->SetResolvedCommand(std::move(resolved));
+
+  return std::move(cmd);
+}
+
+StatusOr<std::unique_ptr<redis::Commander>> Server::LookupAndCreateCommand(const std::string &cmd_name) {
+  if (cmd_name.empty()) {
     return {Status::RedisUnknownCmd};
   }
 
-  auto cmd_attr = cmd_iter->second;
-  auto cmd = cmd_attr->factory();
-  cmd->SetAttributes(cmd_attr);
-
-  return std::move(cmd);
+  return LookupAndCreateCommand(std::vector<std::string>{cmd_name});
 }
 
 Status Server::ScriptExists(const std::string &sha) const {

@@ -433,3 +433,57 @@ func TestCommand(t *testing.T) {
 		}
 	})
 }
+
+func TestCommandSubcommands(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{})
+	defer srv.Close()
+
+	ctx := context.Background()
+	rdb := srv.NewClient()
+	defer func() { require.NoError(t, rdb.Close()) }()
+
+	t.Run("COMMAND INFO can query subcommand metadata", func(t *testing.T) {
+		r := rdb.Do(ctx, "COMMAND", "INFO", "CLIENT|PAUSE", "DEBUG|PROTOCOL", "FUNCTION|FLUSH")
+		vs, err := r.Slice()
+		require.NoError(t, err)
+		require.Len(t, vs, 3)
+
+		clientPause := vs[0].([]interface{})
+		require.Equal(t, "client|pause", clientPause[0])
+		require.EqualValues(t, -3, clientPause[1])
+		require.Equal(t, []interface{}{"readonly", "admin"}, clientPause[2])
+		require.EqualValues(t, 0, clientPause[3])
+		require.EqualValues(t, 0, clientPause[4])
+		require.EqualValues(t, 0, clientPause[5])
+
+		debugProtocol := vs[1].([]interface{})
+		require.Equal(t, "debug|protocol", debugProtocol[0])
+		require.EqualValues(t, 3, debugProtocol[1])
+		require.Equal(t, []interface{}{"readonly"}, debugProtocol[2])
+		require.EqualValues(t, 0, debugProtocol[3])
+		require.EqualValues(t, 0, debugProtocol[4])
+		require.EqualValues(t, 0, debugProtocol[5])
+
+		functionFlush := vs[2].([]interface{})
+		require.Equal(t, "function|flush", functionFlush[0])
+		require.EqualValues(t, -2, functionFlush[1])
+		require.Equal(t, []interface{}{"write", "exclusive", "no-script"}, functionFlush[2])
+		require.EqualValues(t, 0, functionFlush[3])
+		require.EqualValues(t, 0, functionFlush[4])
+		require.EqualValues(t, 0, functionFlush[5])
+	})
+
+	t.Run("COMMAND GETKEYS resolves subcommand key specs", func(t *testing.T) {
+		r := rdb.Do(ctx, "COMMAND", "GETKEYS", "CLUSTER", "KEYSLOT", "sub-key")
+		vs, err := r.Slice()
+		require.NoError(t, err)
+		require.Len(t, vs, 1)
+		require.Equal(t, "sub-key", vs[0])
+	})
+
+	t.Run("unknown subcommands keep subcommand errors", func(t *testing.T) {
+		err := rdb.Do(ctx, "CONFIG", "MISSING").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "Unknown subcommand or wrong number of arguments")
+	})
+}

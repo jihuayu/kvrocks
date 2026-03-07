@@ -142,4 +142,10 @@ REDIS_REGISTER_COMMANDS(
     MakeCmdAttr<CommandEvalSHARO>("evalsha_ro", -3, "read-only no-script skip-monitor", GetScriptEvalKeyRange),
     MakeCmdAttr<CommandScript>("script", -2, "exclusive no-script skip-monitor", NO_KEY, GenerateScriptFlags), )
 
+REDIS_REGISTER_SUBCOMMANDS(
+    Script, "script", MakeArgIndexSubcommandResolver(1),
+    MakeSubCmdAttr<CommandScript>("script", "flush", 2, "write exclusive no-script skip-monitor", NO_KEY),
+    MakeSubCmdAttr<CommandScript>("script", "exists", -3, "read-only exclusive no-script skip-monitor", NO_KEY),
+    MakeSubCmdAttr<CommandScript>("script", "load", 3, "write exclusive no-script skip-monitor", NO_KEY))
+
 }  // namespace redis

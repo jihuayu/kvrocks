@@ -356,12 +356,13 @@ void Connection::SUnsubscribeAll(const UnsubscribeCallback &reply) {
 
 int Connection::SSubscriptionsCount() { return static_cast<int>(subscribe_shard_channels_.size()); }
 
-bool Connection::IsProfilingEnabled(const std::string &cmd) {
+bool Connection::IsProfilingEnabled(const ResolvedCommand &resolved_cmd) {
   auto config = srv_->GetConfig();
   if (config->profiling_sample_ratio == 0) return false;
 
   if (!config->profiling_sample_all_commands &&
-      config->profiling_sample_commands.find(cmd) == config->profiling_sample_commands.end()) {
+      config->profiling_sample_commands.find(resolved_cmd.FullName()) == config->profiling_sample_commands.end() &&
+      config->profiling_sample_commands.find(resolved_cmd.root) == config->profiling_sample_commands.end()) {
     return false;
   }
 
@@ -395,20 +396,20 @@ void Connection::RecordProfilingSampleIfNeed(const std::string &cmd, uint64_t du
   srv_->GetPerfLog()->PushEntry(std::move(entry));
 }
 
-Status Connection::ExecuteCommand(engine::Context &ctx, const std::string &cmd_name,
+Status Connection::ExecuteCommand(engine::Context &ctx, const ResolvedCommand &resolved_cmd,
                                   const std::vector<std::string> &cmd_tokens, Commander *current_cmd,
                                   std::string *reply) {
-  srv_->stats.IncrCalls(cmd_name);
+  srv_->stats.IncrCalls(resolved_cmd.FullName());
 
   auto start = std::chrono::high_resolution_clock::now();
-  bool is_profiling = IsProfilingEnabled(cmd_name);
+  bool is_profiling = IsProfilingEnabled(resolved_cmd);
   auto s = current_cmd->Execute(ctx, srv_, this, reply);
   auto end = std::chrono::high_resolution_clock::now();
   uint64_t duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-  if (is_profiling) RecordProfilingSampleIfNeed(cmd_name, duration);
+  if (is_profiling) RecordProfilingSampleIfNeed(resolved_cmd.FullName(), duration);
 
   srv_->SlowlogPushEntryIfNeeded(&cmd_tokens, duration, this);
-  srv_->stats.IncrLatency(static_cast<uint64_t>(duration), cmd_name);
+  srv_->stats.IncrLatency(static_cast<uint64_t>(duration), resolved_cmd.FullName());
   return s;
 }
 
@@ -418,8 +419,8 @@ static bool IsCmdForIndexing(uint64_t cmd_flags, CommandCategory cmd_cat) {
           cmd_cat == CommandCategory::Script || cmd_cat == CommandCategory::Function);
 }
 
-static bool IsCmdAllowedInStaleData(const std::string &cmd_name) {
-  return cmd_name == "info" || cmd_name == "slaveof" || cmd_name == "config";
+static bool IsCmdAllowedInStaleData(const std::string &cmd_root_name) {
+  return cmd_root_name == "info" || cmd_root_name == "slaveof" || cmd_root_name == "config";
 }
 
 void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
@@ -438,7 +439,7 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
       if (is_multi_exec) multi_error_ = true;
     });
 
-    auto cmd_s = Server::LookupAndCreateCommand(cmd_tokens.front());
+    auto cmd_s = Server::LookupAndCreateCommand(cmd_tokens);
     if (!cmd_s.IsOK()) {
       auto cmd_name = cmd_tokens.front();
       if (util::EqualICase(cmd_name, "host:") || util::EqualICase(cmd_name, "post")) {
@@ -447,6 +448,10 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
             "Cross-Protocol Scripting attack. Connection aborted.");
         EnableFlag(kCloseAsync);
         return;
+      }
+      if (!cmd_s.Is<Status::RedisUnknownCmd>()) {
+        Reply(redis::Error(cmd_s.ToStatus()));
+        continue;
       }
       Reply(redis::Error(
           {Status::NotOK,
@@ -457,8 +462,10 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
     }
     auto current_cmd = std::move(*cmd_s);
 
+    const auto &resolved_cmd = current_cmd->GetResolvedCommand();
     const auto &attributes = current_cmd->GetAttributes();
-    auto cmd_name = attributes->name;
+    const auto &cmd_name = resolved_cmd.FullName();
+    const auto &cmd_root_name = resolved_cmd.root;
 
     int tokens = static_cast<int>(cmd_tokens.size());
     if (!attributes->CheckArity(tokens)) {
@@ -469,7 +476,7 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
     auto cmd_flags = attributes->GenerateFlags(cmd_tokens, *config);
 
     // Push the command back and stop processing; it will be re-executed after unpause.
-    if (srv_->PauseConnIfNeeded(this, cmd_name, cmd_flags)) {
+    if (srv_->PauseConnIfNeeded(this, cmd_root_name, cmd_flags)) {
       multi_error_exit.Disable();  // Don't mark transaction as failed - we're deferring, not erroring
       to_process_cmds->push_front(std::move(cmd_tokens));
       return;
@@ -554,7 +561,7 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
       continue;
     }
 
-    if (!config->slave_serve_stale_data && srv_->IsSlave() && !IsCmdAllowedInStaleData(cmd_name) &&
+    if (!config->slave_serve_stale_data && srv_->IsSlave() && !IsCmdAllowedInStaleData(cmd_root_name) &&
         srv_->GetReplicationState() != kReplConnected) {
       Reply(redis::Error({Status::RedisMasterDown,
                           "Link with MASTER is down "
@@ -607,7 +614,7 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
             cmd_tokens);
       }
 
-      s = ExecuteCommand(ctx, cmd_name, cmd_tokens, current_cmd.get(), &reply);
+      s = ExecuteCommand(ctx, resolved_cmd, cmd_tokens, current_cmd.get(), &reply);
       for (const auto &record : index_records) {
         auto s = GlobalIndexer::Update(ctx, record);
         if (!s.IsOK() && !s.Is<Status::TypeMismatched>()) {

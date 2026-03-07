@@ -262,4 +262,11 @@ REDIS_REGISTER_COMMANDS(Pubsub, MakeCmdAttr<CommandPublish>("publish", 3, "read-
                         MakeCmdAttr<CommandSUnSubscribe>("sunsubscribe", -1, "read-only no-multi no-script", NO_KEY),
                         MakeCmdAttr<CommandPubSub>("pubsub", -2, "read-only no-script", NO_KEY), )
 
+REDIS_REGISTER_SUBCOMMANDS(Pubsub, "pubsub", MakeArgIndexSubcommandResolver(1),
+                           MakeSubCmdAttr<CommandPubSub>("pubsub", "numpat", 2, "read-only no-script", NO_KEY),
+                           MakeSubCmdAttr<CommandPubSub>("pubsub", "numsub", -2, "read-only no-script", NO_KEY),
+                           MakeSubCmdAttr<CommandPubSub>("pubsub", "shardnumsub", -2, "read-only no-script", NO_KEY),
+                           MakeSubCmdAttr<CommandPubSub>("pubsub", "channels", -2, "read-only no-script", NO_KEY),
+                           MakeSubCmdAttr<CommandPubSub>("pubsub", "shardchannels", -2, "read-only no-script", NO_KEY))
+
 }  // namespace redis

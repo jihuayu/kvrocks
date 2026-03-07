@@ -26,11 +26,13 @@
 #include <rocksdb/utilities/backup_engine.h>
 
 #include <deque>
+#include <functional>
 #include <initializer_list>
 #include <iostream>
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -39,6 +41,7 @@
 
 #include "cluster/cluster_defs.h"
 #include "config/config.h"
+#include "commands/subcommand_registry.h"
 #include "error_constants.h"
 #include "logging.h"
 #include "parse_util.h"
@@ -56,6 +59,15 @@ namespace redis {
 
 class Connection;
 struct CommandAttributes;
+
+struct ResolvedCommand {
+  std::string root;
+  std::optional<std::string> sub;
+  const CommandAttributes *attributes = nullptr;
+
+  bool HasSubcommand() const { return sub.has_value(); }
+  const std::string &FullName() const;
+};
 
 enum CommandFlags : uint64_t {
   // "write" flag, for any command that performs rocksdb writing ops
@@ -125,6 +137,8 @@ class Commander {
  public:
   void SetAttributes(const CommandAttributes *attributes) { attributes_ = attributes; }
   const CommandAttributes *GetAttributes() const { return attributes_; }
+  void SetResolvedCommand(ResolvedCommand resolved_command) { resolved_command_ = std::move(resolved_command); }
+  const ResolvedCommand &GetResolvedCommand() const { return resolved_command_; }
   void SetArgs(const std::vector<std::string> &args) { args_ = args; }
   virtual Status Parse() { return Parse(args_); }
   virtual Status Parse([[maybe_unused]] const std::vector<std::string> &args) { return Status::OK(); }
@@ -138,6 +152,7 @@ class Commander {
  protected:
   std::vector<std::string> args_;
   const CommandAttributes *attributes_ = nullptr;
+  ResolvedCommand resolved_command_;
 };
 
 class CommanderWithParseMove : Commander {
@@ -341,6 +356,8 @@ struct CommandAttributes {
   CommandKeyRangeVecGen key_range_vec_gen_;
 };
 
+inline const std::string &ResolvedCommand::FullName() const { return attributes->name; }
+
 using CommandMap = std::map<std::string, const CommandAttributes *>;
 
 inline uint64_t ParseCommandFlags(const std::string &description, const std::string &cmd_name) {
@@ -451,8 +468,41 @@ auto MakeCmdAttr(const std::string &name, int arity, const std::string &descript
   return attr;
 }
 
+template <typename T>
+auto MakeSubCmdAttr(const std::string &parent, const std::string &sub, int arity, const std::string &description,
+                    NoKeyInThisCommand no_key, const AdditionalFlagGen &flag_gen = {}) {
+  return MakeCmdAttr<T>(fmt::format("{}|{}", util::ToLower(parent), util::ToLower(sub)), arity, description, no_key,
+                        flag_gen);
+}
+
+template <typename T>
+auto MakeSubCmdAttr(const std::string &parent, const std::string &sub, int arity, const std::string &description,
+                    int first_key, int last_key, int key_step = 1, const AdditionalFlagGen &flag_gen = {}) {
+  return MakeCmdAttr<T>(fmt::format("{}|{}", util::ToLower(parent), util::ToLower(sub)), arity, description, first_key,
+                        last_key, key_step, flag_gen);
+}
+
+template <typename T>
+auto MakeSubCmdAttr(const std::string &parent, const std::string &sub, int arity, const std::string &description,
+                    const CommandKeyRangeGen &gen, const AdditionalFlagGen &flag_gen = {}) {
+  return MakeCmdAttr<T>(fmt::format("{}|{}", util::ToLower(parent), util::ToLower(sub)), arity, description, gen,
+                        flag_gen);
+}
+
+template <typename T>
+auto MakeSubCmdAttr(const std::string &parent, const std::string &sub, int arity, const std::string &description,
+                    const CommandKeyRangeVecGen &vec_gen, const AdditionalFlagGen &flag_gen = {}) {
+  return MakeCmdAttr<T>(fmt::format("{}|{}", util::ToLower(parent), util::ToLower(sub)), arity, description, vec_gen,
+                        flag_gen);
+}
+
 struct RegisterToCommandTable {
   RegisterToCommandTable(CommandCategory category, std::initializer_list<CommandAttributes> list);
+};
+
+struct RegisterToSubcommandTable {
+  RegisterToSubcommandTable(CommandCategory category, const std::string &parent, SubcommandResolver resolver,
+                            std::initializer_list<CommandAttributes> list);
 };
 
 struct CommandTable {
@@ -466,8 +516,11 @@ struct CommandTable {
   static void GetAllCommandsInfo(std::string *info);
   static void GetCommandsInfo(std::string *info, const std::vector<std::string> &cmd_names);
   static std::string GetCommandInfo(const CommandAttributes *command_attributes);
+  static const CommandAttributes *LookupAttributesByName(const std::string &name);
+  static StatusOr<ResolvedCommand> Resolve(const std::vector<std::string> &cmd_tokens);
   static StatusOr<std::vector<int>> GetKeysFromCommand(const CommandAttributes *attributes,
                                                        const std::vector<std::string> &cmd_tokens);
+  static StatusOr<std::vector<int>> GetKeysFromCommand(const std::vector<std::string> &cmd_tokens);
 
   static size_t Size();
   static bool IsExists(const std::string &name);
@@ -492,6 +545,11 @@ struct CommandTable {
 // NOLINTNEXTLINE
 #define REDIS_REGISTER_COMMANDS(cat, ...)                                                                   \
   static RegisterToCommandTable KVROCKS_CONCAT2(register_to_command_table_, __LINE__)(CommandCategory::cat, \
-                                                                                      {__VA_ARGS__});
+                                                                                       {__VA_ARGS__});
+
+// NOLINTNEXTLINE
+#define REDIS_REGISTER_SUBCOMMANDS(cat, parent, resolver, ...)                                            \
+  static RegisterToSubcommandTable KVROCKS_CONCAT2(register_to_subcommand_table_, __LINE__)(              \
+      CommandCategory::cat, parent, resolver, {__VA_ARGS__});
 
 }  // namespace redis
