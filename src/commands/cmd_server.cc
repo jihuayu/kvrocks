@@ -1683,7 +1683,6 @@ REDIS_REGISTER_COMMANDS(
     MakeCmdAttr<CommandInfo>("info", -1, "read-only ok-loading", NO_KEY),
     MakeCmdAttr<CommandRole>("role", 1, "read-only ok-loading", NO_KEY),
     MakeCmdAttr<CommandConfig>("config", -2, "read-only admin skip-monitor", NO_KEY, GenerateConfigFlag),
-    MakeCmdAttr<CommandNamespace>("namespace", -2, "read-only admin skip-monitor", NO_KEY),
     MakeCmdAttr<CommandKeys>("keys", 2, "read-only slow", NO_KEY),
     MakeCmdAttr<CommandFlushDB>("flushdb", 1, "write no-dbsize-check exclusive", NO_KEY),
     MakeCmdAttr<CommandFlushAll>("flushall", 1, "write no-dbsize-check exclusive admin", NO_KEY),
@@ -1722,7 +1721,8 @@ REDIS_REGISTER_COMMANDS(
     MakeCmdAttr<CommandFlushBlockCache>("flushblockcache", 1, "exclusive write", NO_KEY), )
 
 REDIS_REGISTER_SUBCOMMANDS(
-    Server, "namespace", MakeArgIndexSubcommandResolver(1), DefaultSubcommandFallback(),
+    Server, MakeCmdAttr<CommandNamespace>("namespace", -2, "read-only admin skip-monitor", NO_KEY),
+    MakeArgIndexSubcommandResolver(1), DefaultSubcommandFallback(),
     MakeSubCmdAttr<CommandNamespaceGet>("namespace", "get", 3, "read-only admin skip-monitor", NO_KEY),
     MakeSubCmdAttr<CommandNamespaceSet>("namespace", "set", 4, "read-only admin skip-monitor", NO_KEY),
     MakeSubCmdAttr<CommandNamespaceAdd>("namespace", "add", 4, "read-only admin skip-monitor", NO_KEY),

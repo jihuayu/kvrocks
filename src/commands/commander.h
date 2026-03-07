@@ -60,7 +60,7 @@ namespace redis {
 class Connection;
 struct CommandAttributes;
 
-struct ResolvedCommand {
+struct DispatchedCommand {
   std::string root;
   std::optional<std::string> sub;
   const CommandAttributes *attributes = nullptr;
@@ -137,8 +137,8 @@ class Commander {
  public:
   void SetAttributes(const CommandAttributes *attributes) { attributes_ = attributes; }
   const CommandAttributes *GetAttributes() const { return attributes_; }
-  void SetResolvedCommand(ResolvedCommand resolved_command) { resolved_command_ = std::move(resolved_command); }
-  const ResolvedCommand &GetResolvedCommand() const { return resolved_command_; }
+  void SetDispatchedCommand(DispatchedCommand resolved_command) { dispatched_command_ = std::move(resolved_command); }
+  const DispatchedCommand &GetDispatchedCommand() const { return dispatched_command_; }
   void SetArgs(const std::vector<std::string> &args) { args_ = args; }
   virtual Status Parse() { return Parse(args_); }
   virtual Status Parse([[maybe_unused]] const std::vector<std::string> &args) { return Status::OK(); }
@@ -152,7 +152,7 @@ class Commander {
  protected:
   std::vector<std::string> args_;
   const CommandAttributes *attributes_ = nullptr;
-  ResolvedCommand resolved_command_;
+  DispatchedCommand dispatched_command_;
 };
 
 class CommanderWithParseMove : Commander {
@@ -419,7 +419,7 @@ inline std::vector<std::string> CommandAttributes::FlagsToString(uint64_t flags)
   return res;
 }
 
-inline const std::string &ResolvedCommand::FullName() const { return attributes->name; }
+inline const std::string &DispatchedCommand::FullName() const { return attributes->name; }
 
 template <typename T>
 auto MakeCmdAttr(const std::string &name, int arity, const std::string &description, NoKeyInThisCommand no_key,
@@ -509,7 +509,7 @@ struct RegisterToCommandTable {
 };
 
 struct RegisterToSubcommandTable {
-  RegisterToSubcommandTable(CommandCategory category, const std::string &parent, SubcommandResolver resolver,
+  RegisterToSubcommandTable(CommandCategory category, CommandAttributes parent_attributes, SubcommandResolver resolver,
                             std::optional<CommandAttributes> fallback_attributes,
                             std::initializer_list<CommandAttributes> list);
 };
@@ -526,7 +526,7 @@ struct CommandTable {
   static void GetCommandsInfo(std::string *info, const std::vector<std::string> &cmd_names);
   static std::string GetCommandInfo(const CommandAttributes *command_attributes);
   static const CommandAttributes *LookupAttributesByName(const std::string &name);
-  static StatusOr<ResolvedCommand> Resolve(const std::vector<std::string> &cmd_tokens);
+  static StatusOr<DispatchedCommand> Resolve(const std::vector<std::string> &cmd_tokens);
   static StatusOr<std::vector<int>> GetKeysFromCommand(const CommandAttributes *attributes,
                                                        const std::vector<std::string> &cmd_tokens);
 
@@ -545,6 +545,7 @@ struct CommandTable {
   static inline CommandMap commands;
 
   friend struct RegisterToCommandTable;
+  friend struct RegisterToSubcommandTable;
 };
 
 #define KVROCKS_CONCAT(a, b) a##b                   // NOLINT
@@ -556,8 +557,8 @@ struct CommandTable {
                                                                                       {__VA_ARGS__});
 
 // NOLINTNEXTLINE
-#define REDIS_REGISTER_SUBCOMMANDS(cat, parent, resolver, fallback, ...)                     \
+#define REDIS_REGISTER_SUBCOMMANDS(cat, parent_attributes, resolver, fallback, ...)          \
   static RegisterToSubcommandTable KVROCKS_CONCAT2(register_to_subcommand_table_, __LINE__)( \
-      CommandCategory::cat, parent, resolver, fallback, {__VA_ARGS__});
+      CommandCategory::cat, parent_attributes, resolver, fallback, {__VA_ARGS__});
 
 }  // namespace redis

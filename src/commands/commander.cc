@@ -32,6 +32,11 @@ RegisterToCommandTable::RegisterToCommandTable(CommandCategory category,
   }
 
   for (auto attr : list) {
+    if (CommandTable::GetOriginal()->find(attr.name) != CommandTable::GetOriginal()->end()) {
+      std::cerr << fmt::format("Encountered duplicated command registration '{}'", attr.name) << std::endl;
+      std::abort();
+    }
+
     attr.category = category;
     CommandTable::redis_command_table.emplace_back(attr);
     CommandTable::original_commands[attr.name] = &CommandTable::redis_command_table.back();
@@ -48,8 +53,8 @@ CommandMap *CommandTable::Get() { return &commands; }
 void CommandTable::Reset() { commands = original_commands; }
 
 std::string CommandTable::GetCommandInfo(const CommandAttributes *command_attributes) {
-  std::string command, command_flags;
-  command.append(redis::MultiLen(6));
+  std::string command;
+  command.append(redis::MultiLen(10));
   command.append(redis::BulkString(command_attributes->name));
   command.append(redis::Integer(command_attributes->arity));
   command.append(redis::ArrayOfBulkStrings(CommandAttributes::FlagsToString(command_attributes->InitialFlags())));
@@ -57,6 +62,20 @@ std::string CommandTable::GetCommandInfo(const CommandAttributes *command_attrib
   command.append(redis::Integer(key_range.first_key));
   command.append(redis::Integer(key_range.last_key));
   command.append(redis::Integer(key_range.key_step));
+  command.append(redis::MultiLen(0));
+  command.append(redis::MultiLen(0));
+  command.append(redis::MultiLen(0));
+
+  auto family = SubcommandRegistry::GetFamily(command_attributes->name);
+  if (family == nullptr) {
+    command.append(redis::MultiLen(0));
+    return command;
+  }
+
+  command.append(redis::MultiLen(family->subcommands.size()));
+  for (const auto &[_, subcommand_attributes] : family->subcommands) {
+    command.append(GetCommandInfo(subcommand_attributes));
+  }
   return command;
 }
 
@@ -114,7 +133,7 @@ const CommandAttributes *CommandTable::LookupAttributesByName(const std::string 
   return SubcommandRegistry::LookupSubcommand(root_attributes->name, sub);
 }
 
-StatusOr<ResolvedCommand> CommandTable::Resolve(const std::vector<std::string> &cmd_tokens) {
+StatusOr<DispatchedCommand> CommandTable::Resolve(const std::vector<std::string> &cmd_tokens) {
   if (cmd_tokens.empty()) {
     return {Status::RedisUnknownCmd};
   }
@@ -125,30 +144,30 @@ StatusOr<ResolvedCommand> CommandTable::Resolve(const std::vector<std::string> &
   }
 
   const auto *root_attributes = cmd_iter->second;
-  ResolvedCommand resolved{root_attributes->name, std::nullopt, root_attributes};
+  DispatchedCommand dispatched_command{root_attributes->name, std::nullopt, root_attributes};
 
   auto family = SubcommandRegistry::GetFamily(root_attributes->name);
   if (family == nullptr || !family->resolver) {
-    return resolved;
+    return dispatched_command;
   }
 
   auto subcommand = family->resolver(cmd_tokens);
   if (!subcommand) {
-    return resolved;
+    return dispatched_command;
   }
 
   auto subcommand_attributes = SubcommandRegistry::LookupSubcommand(root_attributes->name, *subcommand);
   if (subcommand_attributes == nullptr) {
     if (auto *fallback_attributes = SubcommandRegistry::GetFallback(root_attributes->name);
         fallback_attributes != nullptr) {
-      resolved.attributes = fallback_attributes;
+      dispatched_command.attributes = fallback_attributes;
     }
-    return resolved;
+    return dispatched_command;
   }
 
-  resolved.sub = std::move(subcommand);
-  resolved.attributes = subcommand_attributes;
-  return resolved;
+  dispatched_command.sub = std::move(subcommand);
+  dispatched_command.attributes = subcommand_attributes;
+  return dispatched_command;
 }
 
 StatusOr<std::vector<int>> CommandTable::GetKeysFromCommand(const CommandAttributes *attributes,

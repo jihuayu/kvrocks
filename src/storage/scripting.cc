@@ -792,7 +792,7 @@ int RedisGenericCommand(lua_State *lua, int raise_error) {
   auto cmd = *std::move(cmd_s);
 
   auto attributes = cmd->GetAttributes();
-  const auto &resolved_cmd = cmd->GetResolvedCommand();
+  const auto &dispatched_command = cmd->GetDispatchedCommand();
   if (!attributes->CheckArity(argc)) {
     PushError(lua, "Wrong number of args while calling Redis command from Lua script");
     return raise_error ? RaiseError(lua) : 1;
@@ -869,8 +869,9 @@ int RedisGenericCommand(lua_State *lua, int raise_error) {
     return raise_error ? RaiseError(lua) : 1;
   }
 
-  if (!config->slave_serve_stale_data && srv->IsSlave() && resolved_cmd.root != "info" &&
-      resolved_cmd.root != "slaveof" && resolved_cmd.root != "config" && srv->GetReplicationState() != kReplConnected) {
+  if (!config->slave_serve_stale_data && srv->IsSlave() && dispatched_command.root != "info" &&
+      dispatched_command.root != "slaveof" && dispatched_command.root != "config" &&
+      srv->GetReplicationState() != kReplConnected) {
     PushError(lua,
               "MASTERDOWN Link with MASTER is down "
               "and slave-serve-stale-data is set to 'no'.");
@@ -878,7 +879,7 @@ int RedisGenericCommand(lua_State *lua, int raise_error) {
   }
 
   std::string output;
-  s = conn->ExecuteCommand(*script_run_ctx->ctx, resolved_cmd, args, cmd.get(), &output);
+  s = conn->ExecuteCommand(*script_run_ctx->ctx, dispatched_command, args, cmd.get(), &output);
   if (!s) {
     PushError(lua, s.Msg().data());
     return raise_error ? RaiseError(lua) : 1;

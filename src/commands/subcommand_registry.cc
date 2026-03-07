@@ -103,7 +103,7 @@ const CommandAttributes *SubcommandRegistry::LookupSubcommand(const std::string 
   return it->second;
 }
 
-RegisterToSubcommandTable::RegisterToSubcommandTable(CommandCategory category, const std::string &parent,
+RegisterToSubcommandTable::RegisterToSubcommandTable(CommandCategory category, CommandAttributes parent_attributes,
                                                      SubcommandResolver resolver,
                                                      std::optional<CommandAttributes> fallback_attributes,
                                                      std::initializer_list<CommandAttributes> list) {
@@ -111,8 +111,25 @@ RegisterToSubcommandTable::RegisterToSubcommandTable(CommandCategory category, c
     return;
   }
 
-  auto normalized_parent = util::ToLower(parent);
-  const CommandAttributes *registered_fallback_attr = nullptr;
+  auto normalized_parent = util::ToLower(parent_attributes.name);
+  if (parent_attributes.name.find('|') != std::string::npos) {
+    std::cerr << fmt::format("Encountered invalid subcommand parent '{}'", parent_attributes.name) << std::endl;
+    std::abort();
+  }
+
+  if (CommandTable::GetOriginal()->find(normalized_parent) != CommandTable::GetOriginal()->end()) {
+    std::cerr << fmt::format("Encountered duplicated command registration '{}'", normalized_parent) << std::endl;
+    std::abort();
+  }
+
+  parent_attributes.name = normalized_parent;
+  parent_attributes.category = category;
+  CommandTable::redis_command_table.emplace_back(std::move(parent_attributes));
+  const auto *registered_parent_attr = &CommandTable::redis_command_table.back();
+  CommandTable::original_commands[registered_parent_attr->name] = registered_parent_attr;
+  CommandTable::commands[registered_parent_attr->name] = registered_parent_attr;
+
+  const CommandAttributes *registered_fallback_attr = registered_parent_attr;
   if (fallback_attributes) {
     auto &subcommand_fallback_table = GetSubcommandFallbackTable();
     fallback_attributes->category = category;
@@ -130,20 +147,27 @@ RegisterToSubcommandTable::RegisterToSubcommandTable(CommandCategory category, c
     auto *registered_attr = &subcommand_table.back();
     auto delimiter = registered_attr->name.find('|');
     if (delimiter == std::string::npos) {
-      std::cout << fmt::format("Encountered invalid subcommand name '{}'", registered_attr->name) << std::endl;
+      std::cerr << fmt::format("Encountered invalid subcommand name '{}'", registered_attr->name) << std::endl;
       std::abort();
     }
 
     auto registered_parent = registered_attr->name.substr(0, delimiter);
     if (registered_parent != normalized_parent) {
-      std::cout << fmt::format("Encountered mismatched subcommand parent '{}', expected '{}'", registered_parent,
+      std::cerr << fmt::format("Encountered mismatched subcommand parent '{}', expected '{}'", registered_parent,
                                normalized_parent)
                 << std::endl;
       std::abort();
     }
 
-    SubcommandRegistry::RegisterSubcommand(registered_parent, registered_attr->name.substr(delimiter + 1),
-                                           registered_attr);
+    auto registered_subcommand = registered_attr->name.substr(delimiter + 1);
+    if (SubcommandRegistry::LookupSubcommand(registered_parent, registered_subcommand) != nullptr) {
+      std::cerr << fmt::format("Encountered duplicated subcommand registration '{}|{}'", registered_parent,
+                               registered_subcommand)
+                << std::endl;
+      std::abort();
+    }
+
+    SubcommandRegistry::RegisterSubcommand(registered_parent, registered_subcommand, registered_attr);
   }
 }
 

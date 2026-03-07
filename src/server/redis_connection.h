@@ -168,9 +168,9 @@ class Connection : public EvbufCallbackBase<Connection> {
   evbuffer *Output() { return bufferevent_get_output(bev_); }
   bufferevent *GetBufferEvent() { return bev_; }
   void ExecuteCommands(std::deque<CommandTokens> *to_process_cmds);
-  Status ExecuteCommand(engine::Context &ctx, const ResolvedCommand &resolved_cmd,
+  Status ExecuteCommand(engine::Context &ctx, const DispatchedCommand &dispatched_command,
                         const std::vector<std::string> &cmd_tokens, Commander *current_cmd, std::string *reply);
-  bool IsProfilingEnabled(const ResolvedCommand &resolved_cmd);
+  bool IsProfilingEnabled(const DispatchedCommand &dispatched_command);
   void RecordProfilingSampleIfNeed(const std::string &cmd, uint64_t duration);
   void SetImporting() { importing_ = true; }
   bool IsImporting() const { return importing_; }

@@ -1864,11 +1864,11 @@ ReplState Server::GetReplicationState() {
 }
 
 StatusOr<std::unique_ptr<redis::Commander>> Server::LookupAndCreateCommand(const std::vector<std::string> &cmd_tokens) {
-  auto resolved = GET_OR_RET(redis::CommandTable::Resolve(cmd_tokens));
+  auto dispatched_command = GET_OR_RET(redis::CommandTable::Resolve(cmd_tokens));
 
-  auto cmd = resolved.attributes->factory();
-  cmd->SetAttributes(resolved.attributes);
-  cmd->SetResolvedCommand(std::move(resolved));
+  auto cmd = dispatched_command.attributes->factory();
+  cmd->SetAttributes(dispatched_command.attributes);
+  cmd->SetDispatchedCommand(std::move(dispatched_command));
 
   return std::move(cmd);
 }
