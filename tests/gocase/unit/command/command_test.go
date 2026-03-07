@@ -433,3 +433,41 @@ func TestCommand(t *testing.T) {
 		}
 	})
 }
+
+func TestCommandNamespaceSubcommands(t *testing.T) {
+	srv := util.StartServer(t, map[string]string{})
+	defer srv.Close()
+
+	ctx := context.Background()
+	rdb := srv.NewClient()
+	defer func() { require.NoError(t, rdb.Close()) }()
+
+	t.Run("COMMAND INFO can query namespace subcommand metadata", func(t *testing.T) {
+		r := rdb.Do(ctx, "COMMAND", "INFO", "NAMESPACE|ADD", "NAMESPACE|CURRENT")
+		vs, err := r.Slice()
+		require.NoError(t, err)
+		require.Len(t, vs, 2)
+
+		add := vs[0].([]interface{})
+		require.Equal(t, "namespace|add", add[0])
+		require.EqualValues(t, 4, add[1])
+		require.Equal(t, []interface{}{"readonly", "admin", "skip-monitor"}, add[2])
+		require.EqualValues(t, 0, add[3])
+		require.EqualValues(t, 0, add[4])
+		require.EqualValues(t, 0, add[5])
+
+		current := vs[1].([]interface{})
+		require.Equal(t, "namespace|current", current[0])
+		require.EqualValues(t, 2, current[1])
+		require.Equal(t, []interface{}{"readonly", "skip-monitor"}, current[2])
+		require.EqualValues(t, 0, current[3])
+		require.EqualValues(t, 0, current[4])
+		require.EqualValues(t, 0, current[5])
+	})
+
+	t.Run("NAMESPACE keeps legacy invalid subcommand error", func(t *testing.T) {
+		err := rdb.Do(ctx, "NAMESPACE", "MISSING").Err()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "NAMESPACE subcommand must be one of GET, SET, DEL, ADD and CURRENT")
+	})
+}

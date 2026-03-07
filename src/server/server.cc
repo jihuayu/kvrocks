@@ -1863,20 +1863,20 @@ ReplState Server::GetReplicationState() {
   return kReplConnecting;
 }
 
+StatusOr<std::unique_ptr<redis::Commander>> Server::LookupAndCreateCommand(const std::vector<std::string> &cmd_tokens) {
+  auto resolved = GET_OR_RET(redis::CommandTable::Resolve(cmd_tokens));
+
+  auto cmd = resolved.attributes->factory();
+  cmd->SetAttributes(resolved.attributes);
+  cmd->SetResolvedCommand(std::move(resolved));
+
+  return std::move(cmd);
+}
+
 StatusOr<std::unique_ptr<redis::Commander>> Server::LookupAndCreateCommand(const std::string &cmd_name) {
   if (cmd_name.empty()) return {Status::RedisUnknownCmd};
 
-  auto commands = redis::CommandTable::Get();
-  auto cmd_iter = commands->find(util::ToLower(cmd_name));
-  if (cmd_iter == commands->end()) {
-    return {Status::RedisUnknownCmd};
-  }
-
-  auto cmd_attr = cmd_iter->second;
-  auto cmd = cmd_attr->factory();
-  cmd->SetAttributes(cmd_attr);
-
-  return std::move(cmd);
+  return LookupAndCreateCommand(std::vector<std::string>{cmd_name});
 }
 
 Status Server::ScriptExists(const std::string &sha) const {
