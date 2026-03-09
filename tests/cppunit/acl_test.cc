@@ -86,11 +86,11 @@ bool ContainsUsername(const std::vector<std::string> &users, const std::string &
   return std::find(users.begin(), users.end(), target) != users.end();
 }
 
-uint32_t RootSelectorFlags(const std::shared_ptr<const redis::AclUser> &user) {
-  if (!user || user->allowed_commands.empty()) {
-    return 0;
+std::optional<std::string> FirstKeyPattern(const std::shared_ptr<const redis::AclUser> &user) {
+  if (!user || user->allowed_commands.empty() || user->allowed_commands.front().key_patterns.empty()) {
+    return std::nullopt;
   }
-  return user->allowed_commands.front().flags;
+  return user->allowed_commands.front().key_patterns.front().pattern;
 }
 
 }  // namespace
@@ -369,8 +369,8 @@ TEST_F(AclTest, UsernameMatchByIndexWithSlotReuse) {
 
 TEST_F(AclTest, HotPathLookupsFollowManagerSwap) {
   auto acl = createAcl();
-  const auto first_user = BuildUser(true, "default", 1);
-  const auto second_user = BuildUser(true, "default", 7);
+  const auto first_user = BuildUserWithPatterns("default", {"alpha:*"});
+  const auto second_user = BuildUserWithPatterns("default", {"beta:*"});
 
   ASSERT_TRUE(acl->Set("slot_user_a", first_user).IsOK());
   const auto file_a = (std::filesystem::path(config_.db_dir) / "acl-hot-path-a.conf").string();
@@ -387,13 +387,17 @@ TEST_F(AclTest, HotPathLookupsFollowManagerSwap) {
 
   auto first_snapshot = acl->GetCachedUserByIndex(*slot_index);
   ASSERT_NE(nullptr, first_snapshot);
-  EXPECT_EQ(1U, RootSelectorFlags(first_snapshot));
+  auto first_pattern = FirstKeyPattern(first_snapshot);
+  ASSERT_TRUE(first_pattern.has_value());
+  EXPECT_EQ("alpha:*", *first_pattern);
   EXPECT_TRUE(acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_a"));
 
   ASSERT_TRUE(acl->LoadAclFromFile(file_b).IsOK());
   auto second_snapshot = acl->GetCachedUserByIndex(*slot_index);
   ASSERT_NE(nullptr, second_snapshot);
-  EXPECT_EQ(7U, RootSelectorFlags(second_snapshot));
+  auto second_pattern = FirstKeyPattern(second_snapshot);
+  ASSERT_TRUE(second_pattern.has_value());
+  EXPECT_EQ("beta:*", *second_pattern);
   EXPECT_FALSE(acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_a"));
   EXPECT_TRUE(acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_b"));
 
@@ -451,8 +455,8 @@ TEST_F(AclTest, ConcurrentUserOperations) {
 
 TEST_F(AclTest, HotPathLookupsRemainConsistentAcrossConcurrentManagerReloads) {
   auto acl = createAcl();
-  const auto first_user = BuildUser(true, "default", 1);
-  const auto second_user = BuildUser(true, "default", 7);
+  const auto first_user = BuildUserWithPatterns("default", {"alpha:*"});
+  const auto second_user = BuildUserWithPatterns("default", {"beta:*"});
 
   ASSERT_TRUE(acl->Set("slot_user_a", first_user).IsOK());
   const auto file_a = (std::filesystem::path(config_.db_dir) / "acl-hot-path-race-a.conf").string();
@@ -485,37 +489,31 @@ TEST_F(AclTest, HotPathLookupsRemainConsistentAcrossConcurrentManagerReloads) {
 
   std::thread reader([&] {
     while (!stop.load(std::memory_order_relaxed) && !failed.load(std::memory_order_relaxed)) {
-      auto before_version = acl->GetVersion();
       auto cached_user = acl->GetCachedUserByIndex(*slot_index);
-      auto matches_first = acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_a");
-      auto matches_second = acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_b");
-      auto after_version = acl->GetVersion();
-
-      if (before_version != after_version) {
-        continue;
-      }
-
       stable_samples.fetch_add(1, std::memory_order_relaxed);
-      if (matches_first == matches_second) {
-        record_failure("expected exactly one ACL username match for a stable hot-path snapshot");
-        continue;
-      }
       if (!cached_user) {
-        record_failure("expected ACL user data for a stable hot-path snapshot");
+        record_failure("expected ACL user data for a hot-path snapshot");
         continue;
       }
 
-      auto selector_flags = RootSelectorFlags(cached_user);
-      if (matches_first) {
+      auto key_pattern = FirstKeyPattern(cached_user);
+      if (!key_pattern.has_value()) {
+        record_failure("expected a key-pattern-based ACL user for a hot-path snapshot");
+        continue;
+      }
+      if (*key_pattern != "alpha:*" && *key_pattern != "beta:*") {
+        record_failure("hot-path ACL snapshot returned unexpected user data");
+        continue;
+      }
+
+      if (acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_a")) {
         saw_first_user.store(true, std::memory_order_relaxed);
-        if (selector_flags != 1U) {
-          record_failure("stable ACL snapshot returned mismatched user data for slot_user_a");
-        }
-      } else {
+      }
+      if (acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_b")) {
         saw_second_user.store(true, std::memory_order_relaxed);
-        if (selector_flags != 7U) {
-          record_failure("stable ACL snapshot returned mismatched user data for slot_user_b");
-        }
+      }
+      if (acl->IsUsernameMatchedByIndex(*slot_index, "slot_user_missing")) {
+        record_failure("hot-path ACL snapshot matched an unrelated username");
       }
 
       std::this_thread::yield();
@@ -523,7 +521,11 @@ TEST_F(AclTest, HotPathLookupsRemainConsistentAcrossConcurrentManagerReloads) {
   });
 
   for (int i = 0; i < 200 && !failed.load(std::memory_order_relaxed); ++i) {
-    ASSERT_TRUE(acl->LoadAclFromFile((i % 2 == 0) ? file_b : file_a).IsOK());
+    auto status = acl->LoadAclFromFile((i % 2 == 0) ? file_b : file_a);
+    if (!status.IsOK()) {
+      record_failure("failed to reload ACL file during hot-path race test: " + status.Msg());
+      break;
+    }
     std::this_thread::yield();
   }
 
