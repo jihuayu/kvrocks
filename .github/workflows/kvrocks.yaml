@@ -76,10 +76,16 @@ jobs:
         with:
           go-version-file: 'tests/gocase/go.mod'
           cache: false
+      - name: Add LLVM repo
+        run: |
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-13 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt update
       - name: Prepare Dependencies
         run: |
-          sudo apt update
           sudo apt install -y clang-format-18 clang-tidy-18
+          clang-format-18 --version
+          clang-tidy-18 --version
       - name: Check with clang-format
         id: check-format
         run: ./x.py check format --clang-format-path clang-format-18
