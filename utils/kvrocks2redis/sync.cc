@@ -100,10 +100,16 @@ Status Sync::checkWalBoundary() {
     auto batch = iter->GetBatch();
     if (next_seq_ != batch.sequence) {
       if (next_seq_ > batch.sequence) {
+        // WAL moved backward; this indicates data corruption or an unexpected state
         ERROR("checkWALBoundary with sequence: {}, but GetWALIter return older sequence: {}", next_seq_,
               batch.sequence);
+        return {Status::NotOK};
       }
-      return {Status::NotOK};
+      // batch.sequence > next_seq_: a gap in the WAL (e.g. due to WAL compaction or TTL).
+      // Skip forward to the first available sequence so incremental sync can continue.
+      INFO("WAL sequence gap detected: expected {}, got {}. Skipping forward to avoid unnecessary full resync.",
+           next_seq_, batch.sequence);
+      next_seq_ = batch.sequence;
     }
     return Status::OK();
   }
@@ -118,15 +124,23 @@ Status Sync::incrementBatchLoop() {
       return {Status::NotOK};
     }
     if (next_seq_ <= storage_->LatestSeqNumber()) {
-      storage_->GetDB()->GetUpdatesSince(next_seq_, &iter);
+      if (auto rs = storage_->GetDB()->GetUpdatesSince(next_seq_, &iter); !rs.ok()) {
+        return {Status::NotOK,
+                fmt::format("failed to get WAL updates since sequence {}: {}", next_seq_, rs.ToString())};
+      }
       for (; iter->Valid(); iter->Next()) {
         auto batch = iter->GetBatch();
         if (batch.sequence != next_seq_) {
           if (next_seq_ > batch.sequence) {
-            ERROR("checkWALBoundary with sequence: {}, but GetWALIter return older sequence: {}", next_seq_,
+            ERROR("incrementBatchLoop with sequence: {}, but GetUpdatesSince returned older sequence: {}", next_seq_,
                   batch.sequence);
+            return {Status::NotOK};
           }
-          return {Status::NotOK};
+          // batch.sequence > next_seq_: gap in WAL; skip forward
+          INFO("WAL sequence gap detected in incrementBatchLoop: expected {}, got {}. Skipping forward.", next_seq_,
+               batch.sequence);
+          auto s = updateNextSeq(batch.sequence);
+          if (!s.IsOK()) return s.Prefixed("failed to update next sequence after WAL gap");
         }
         auto s = parser_->ParseWriteBatch(batch.writeBatchPtr->Data());
         if (!s.IsOK()) {
