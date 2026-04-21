@@ -34,6 +34,8 @@ concurrency:
 
 env:
   KVROCKS_DEPS_CACHE_DIR: build-deps
+  # Temporarily isolate the proxy-sensitive replication tests while debugging an
+  # intermittent CI flake. A green narrowed run does not prove that the issue is gone.
   GO_PROXY_TEST_PATTERN: ^(TestSlaveLostMaster|TestSlowConsumerBug|TestSlowConsumerBlocksIndefinitely)$
   GO_PROXY_TEST_PACKAGE: ./integration/replication
   GO_PROXY_TEST_TIMEOUT: 300s
@@ -391,6 +393,9 @@ jobs:
           ./x.py test cpp
 
       - name: Run Proxy Go Integration Cases
+        # Temporary debugging mode for an intermittent proxy-related flake in
+        # tests/gocase/integration/replication. Keep the scope narrow so rare
+        # failures are easier to correlate with workspace logs and artifacts.
         run: |
           ulimit -c unlimited
           export LSAN_OPTIONS="suppressions=$(realpath ./tests/lsan-suppressions)"
@@ -704,6 +709,9 @@ jobs:
           ./x.py test cpp
 
       - name: Run Proxy Go Integration Cases
+        # Temporary debugging mode for an intermittent proxy-related flake in
+        # tests/gocase/integration/replication. Keep the scope narrow so rare
+        # failures are easier to correlate with workspace logs and artifacts.
         run: |
           export PATH=$PATH:$HOME/local/bin/
           GOCASE_RUN_ARGS=""
