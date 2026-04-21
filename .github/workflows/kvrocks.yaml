@@ -39,6 +39,7 @@ env:
   GO_PROXY_TEST_PATTERN: ^(TestSlaveLostMaster|TestSlowConsumerBug|TestSlowConsumerBlocksIndefinitely)$
   GO_PROXY_TEST_PACKAGE: ./integration/replication
   GO_PROXY_TEST_TIMEOUT: 300s
+  GO_PROXY_TEST_REPEAT: 3
 
 jobs:
   precondition:
@@ -414,17 +415,20 @@ jobs:
           BIN_PATH="$(pwd)/build/kvrocks"
           WORKSPACE="$(pwd)/tests/gocase/workspace"
           cd tests/gocase
-          go test -timeout="${{ env.GO_PROXY_TEST_TIMEOUT }}" -bench=. "${{ env.GO_PROXY_TEST_PACKAGE }}" \
-            -binPath="$BIN_PATH" \
-            -cliPath=redis-cli \
-            -workspace="$WORKSPACE" \
-            -parallel 1 \
-            -count 1 \
-            -run "${{ env.GO_PROXY_TEST_PATTERN }}" \
-            $GOCASE_RUN_ARGS \
-            ${{ matrix.ignore_when_tsan }} \
-            ${{ matrix.ignore_when_asan }} \
-            ${{ matrix.ignore_when_ubsan }}
+          for attempt in $(seq 1 "${{ env.GO_PROXY_TEST_REPEAT }}"); do
+            echo "Running proxy integration tests attempt ${attempt}/${{ env.GO_PROXY_TEST_REPEAT }}"
+            go test -v -timeout="${{ env.GO_PROXY_TEST_TIMEOUT }}" -bench=. "${{ env.GO_PROXY_TEST_PACKAGE }}" \
+              -binPath="$BIN_PATH" \
+              -cliPath=redis-cli \
+              -workspace="$WORKSPACE" \
+              -parallel 1 \
+              -count 1 \
+              -run "${{ env.GO_PROXY_TEST_PATTERN }}" \
+              $GOCASE_RUN_ARGS \
+              ${{ matrix.ignore_when_tsan }} \
+              ${{ matrix.ignore_when_asan }} \
+              ${{ matrix.ignore_when_ubsan }}
+          done
 
       - name: Show gocase workspace diagnostics
         if: ${{ failure() }}
@@ -718,13 +722,16 @@ jobs:
           BIN_PATH="$(pwd)/build/kvrocks"
           WORKSPACE="$(pwd)/tests/gocase/workspace"
           cd tests/gocase
-          go test -timeout="${{ env.GO_PROXY_TEST_TIMEOUT }}" -bench=. "${{ env.GO_PROXY_TEST_PACKAGE }}" \
-            -binPath="$BIN_PATH" \
-            -cliPath=redis-cli \
-            -workspace="$WORKSPACE" \
-            -parallel 1 \
-            -count 1 \
-            -run "${{ env.GO_PROXY_TEST_PATTERN }}"
+          for attempt in $(seq 1 "${{ env.GO_PROXY_TEST_REPEAT }}"); do
+            echo "Running proxy integration tests attempt ${attempt}/${{ env.GO_PROXY_TEST_REPEAT }}"
+            go test -v -timeout="${{ env.GO_PROXY_TEST_TIMEOUT }}" -bench=. "${{ env.GO_PROXY_TEST_PACKAGE }}" \
+              -binPath="$BIN_PATH" \
+              -cliPath=redis-cli \
+              -workspace="$WORKSPACE" \
+              -parallel 1 \
+              -count 1 \
+              -run "${{ env.GO_PROXY_TEST_PATTERN }}"
+          done
 
       - name: Show gocase workspace diagnostics
         if: ${{ failure() }}

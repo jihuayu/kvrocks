@@ -19,6 +19,8 @@ The CI workflow temporarily narrows the Go integration step to make the flake ea
 - `-parallel 1`
 - `-count 1`
 - `-timeout 300s`
+- repeat the same narrowed proxy step multiple times per job
+- `go test -v`
 
 When one of these tests fails, the workflow also prints recent files from `tests/gocase/workspace` and uploads that workspace as an artifact.
 
