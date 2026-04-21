@@ -27,6 +27,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -89,33 +90,48 @@ func SimpleTCPProxy(ctx context.Context, t testing.TB, to string, slowdown bool)
 		t.Fatalf("listen to %s failed, err: %v", from, err)
 	}
 
-	copyBytes := func(src, dest io.ReadWriter) func() error {
+	closeWhenDone := func(conn net.Conn, done <-chan struct{}) {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}
+
+	copyBytes := func(src net.Conn, dest net.Conn) func() error {
 		buffer := make([]byte, 4096)
 		return func() error {
 		COPY_LOOP:
 			for {
-				select {
-				case <-ctx.Done():
-					t.Log("forwarding tcp stream stopped")
+				if ctx.Err() != nil {
 					break COPY_LOOP
-				default:
-					if slowdown {
-						time.Sleep(time.Millisecond * 100)
+				}
+				if slowdown {
+					time.Sleep(time.Millisecond * 100)
+				}
+				_ = src.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+				n, err := src.Read(buffer)
+				if err != nil {
+					if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+						break COPY_LOOP
 					}
-					n, err := src.Read(buffer)
-					if err != nil {
-						if errors.Is(err, io.EOF) {
-							break COPY_LOOP
-						}
-						return err
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						continue
 					}
-					_, err = dest.Write(buffer[:n])
-					if err != nil {
-						if errors.Is(err, io.EOF) {
-							break COPY_LOOP
-						}
-						return err
+					if ctx.Err() != nil {
+						break COPY_LOOP
 					}
+					return err
+				}
+				_, err = dest.Write(buffer[:n])
+				if err != nil {
+					if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+						break COPY_LOOP
+					}
+					if ctx.Err() != nil {
+						break COPY_LOOP
+					}
+					return err
 				}
 			}
 			return nil
@@ -123,31 +139,58 @@ func SimpleTCPProxy(ctx context.Context, t testing.TB, to string, slowdown bool)
 	}
 
 	go func() {
-		defer listener.Close()
+		var connWG sync.WaitGroup
+		defer func() {
+			_ = listener.Close()
+			connWG.Wait()
+		}()
+		go func() {
+			<-ctx.Done()
+			_ = listener.Close()
+		}()
 	LISTEN_LOOP:
 		for {
-			select {
-			case <-ctx.Done():
-				break LISTEN_LOOP
+			if tcpListener, ok := listener.(*net.TCPListener); ok {
+				_ = tcpListener.SetDeadline(time.Now().Add(100 * time.Millisecond))
+			}
+			conn, err := listener.Accept()
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
+					break LISTEN_LOOP
+				}
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				t.Logf("accept conn failed, err: %v", err)
+				continue
+			}
+			dest, err := net.Dial("tcp", to)
+			if err != nil {
+				_ = conn.Close()
+				if ctx.Err() != nil {
+					break LISTEN_LOOP
+				}
+				t.Logf("dial to %s failed, err: %v", to, err)
+				continue
+			}
+			connWG.Add(1)
+			go func(conn net.Conn, dest net.Conn) {
+				defer connWG.Done()
+				defer conn.Close()
+				defer dest.Close()
 
-			default:
-				conn, err := listener.Accept()
-				if err != nil {
-					t.Fatalf("accept conn failed, err: %v", err)
-				}
-				dest, err := net.Dial("tcp", to)
-				if err != nil {
-					t.Fatalf("accept conn failed, err: %v", err)
-				}
+				done := make(chan struct{})
+				defer close(done)
+				go closeWhenDone(conn, done)
+				go closeWhenDone(dest, done)
+
 				var errGrp errgroup.Group
 				errGrp.Go(copyBytes(conn, dest))
 				errGrp.Go(copyBytes(dest, conn))
-				err = errGrp.Wait()
-				if err != nil {
-					t.Fatalf("forward tcp stream failed, err: %v", err)
+				if err := errGrp.Wait(); err != nil && ctx.Err() == nil {
+					t.Logf("forward tcp stream failed, err: %v", err)
 				}
-
-			}
+			}(conn, dest)
 		}
 	}()
 	return uint64(addr.Port)
