@@ -34,6 +34,9 @@ concurrency:
 
 env:
   KVROCKS_DEPS_CACHE_DIR: build-deps
+  GO_PROXY_TEST_PATTERN: ^(TestSlaveLostMaster|TestSlowConsumerBug|TestSlowConsumerBlocksIndefinitely)$
+  GO_PROXY_TEST_PACKAGE: ./integration/replication
+  GO_PROXY_TEST_TIMEOUT: 300s
 
 jobs:
   precondition:
@@ -387,7 +390,7 @@ jobs:
           export TSAN_OPTIONS="suppressions=$(realpath ./tests/tsan-suppressions)"
           ./x.py test cpp
 
-      - name: Run Go Integration Cases
+      - name: Run Proxy Go Integration Cases
         run: |
           ulimit -c unlimited
           export LSAN_OPTIONS="suppressions=$(realpath ./tests/lsan-suppressions)"
@@ -403,7 +406,48 @@ jobs:
             cp minica.pem tests/gocase/tls/cert/ca.crt
             GOCASE_RUN_ARGS="-tlsEnable"
           fi
-          ./x.py test go build -parallel 2 $GOCASE_RUN_ARGS ${{ matrix.ignore_when_tsan}} ${{ matrix.ignore_when_asan}} ${{ matrix.ignore_when_ubsan}}
+          BIN_PATH="$(pwd)/build/kvrocks"
+          WORKSPACE="$(pwd)/tests/gocase/workspace"
+          cd tests/gocase
+          go test -timeout="${{ env.GO_PROXY_TEST_TIMEOUT }}" -bench=. "${{ env.GO_PROXY_TEST_PACKAGE }}" \
+            -binPath="$BIN_PATH" \
+            -cliPath=redis-cli \
+            -workspace="$WORKSPACE" \
+            -parallel 1 \
+            -count 1 \
+            -run "${{ env.GO_PROXY_TEST_PATTERN }}" \
+            $GOCASE_RUN_ARGS \
+            ${{ matrix.ignore_when_tsan }} \
+            ${{ matrix.ignore_when_asan }} \
+            ${{ matrix.ignore_when_ubsan }}
+
+      - name: Show gocase workspace diagnostics
+        if: ${{ failure() }}
+        run: |
+          if [ ! -d tests/gocase/workspace ]; then
+            echo "tests/gocase/workspace does not exist"
+            exit 0
+          fi
+
+          echo "gocase workspace directories:"
+          find tests/gocase/workspace -type d | sort
+
+          echo
+          echo "recent gocase logs:"
+          find tests/gocase/workspace -type f \( -name stdout -o -name stderr -o -name 'kvrocks_*.log' \) | sort | tail -n 20 |
+          while IFS= read -r file; do
+            echo "===== $file ====="
+            tail -n 200 "$file" || true
+            echo
+          done
+
+      - name: Upload gocase workspace
+        uses: actions/upload-artifact@v7
+        if: ${{ failure() }}
+        with:
+          name: gocase-workspace-${{ matrix.name }}
+          if-no-files-found: ignore
+          path: tests/gocase/workspace/**
 
       - name: Install redis-py
         run: pip3 install redis==5.2.0
@@ -659,11 +703,48 @@ jobs:
         run: |
           ./x.py test cpp
 
-      - name: Run Go Integration Cases
+      - name: Run Proxy Go Integration Cases
         run: |
           export PATH=$PATH:$HOME/local/bin/
           GOCASE_RUN_ARGS=""
-          ./x.py test go build -parallel 2 $GOCASE_RUN_ARGS
+          BIN_PATH="$(pwd)/build/kvrocks"
+          WORKSPACE="$(pwd)/tests/gocase/workspace"
+          cd tests/gocase
+          go test -timeout="${{ env.GO_PROXY_TEST_TIMEOUT }}" -bench=. "${{ env.GO_PROXY_TEST_PACKAGE }}" \
+            -binPath="$BIN_PATH" \
+            -cliPath=redis-cli \
+            -workspace="$WORKSPACE" \
+            -parallel 1 \
+            -count 1 \
+            -run "${{ env.GO_PROXY_TEST_PATTERN }}"
+
+      - name: Show gocase workspace diagnostics
+        if: ${{ failure() }}
+        run: |
+          if [ ! -d tests/gocase/workspace ]; then
+            echo "tests/gocase/workspace does not exist"
+            exit 0
+          fi
+
+          echo "gocase workspace directories:"
+          find tests/gocase/workspace -type d | sort
+
+          echo
+          echo "recent gocase logs:"
+          find tests/gocase/workspace -type f \( -name stdout -o -name stderr -o -name 'kvrocks_*.log' \) | sort | tail -n 20 |
+          while IFS= read -r file; do
+            echo "===== $file ====="
+            tail -n 200 "$file" || true
+            echo
+          done
+
+      - name: Upload gocase workspace
+        uses: actions/upload-artifact@v7
+        if: ${{ failure() }}
+        with:
+          name: gocase-workspace-container-${{ matrix.name }}
+          if-no-files-found: ignore
+          path: tests/gocase/workspace/**
 
       - name: Install redis-py for openSUSE and Rocky
         if: ${{ !startsWith(matrix.image, 'archlinux') && !startsWith(matrix.image, 'debian') && !startsWith(matrix.image, 'alpine') }}
