@@ -68,11 +68,9 @@ jobs:
         with:
           config: .github/config/licenserc.yml
 
-  check-and-lint:
-    name: Lint and check code
-    needs: [precondition, check-typos]
-    if: ${{ needs.precondition.outputs.docs_only != 'true' }}
-    runs-on: ubuntu-24.04
+  cache-kvrocks-deps:
+    name: Cache Kvrocks dependencies
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
       - name: Restore Kvrocks dependency cache
@@ -87,6 +85,20 @@ jobs:
         run: |
           ./x.py fetch-deps ${{ env.KVROCKS_DEPS_CACHE_DIR }}
           ./x.py fetch-deps ${{ env.KVROCKS_DEPS_CACHE_DIR }} -D ENABLE_LUAJIT=OFF
+
+  check-and-lint:
+    name: Lint and check code
+    needs: [precondition, check-typos, cache-kvrocks-deps]
+    if: ${{ needs.precondition.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Restore Kvrocks dependency cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.KVROCKS_DEPS_CACHE_DIR }}
+          key: kvrocks-full-deps-${{ hashFiles('x.py', 'CMakeLists.txt', 'cmake/**/*.cmake') }}
+          enableCrossOsArchive: true
       - uses: actions/setup-go@v6
         with:
           go-version-file: 'tests/gocase/go.mod'
@@ -120,7 +132,7 @@ jobs:
 
   build-and-test:
     name: Build and test
-    needs: [precondition, check-typos]
+    needs: [precondition, check-typos, cache-kvrocks-deps]
     if: ${{ needs.precondition.outputs.docs_only != 'true' }}
     strategy:
       fail-fast: false
@@ -479,7 +491,7 @@ jobs:
 
   check-docker:
     name: Check Docker image
-    needs: [precondition, check-typos]
+    needs: [precondition, check-typos, cache-kvrocks-deps]
     if: ${{ needs.precondition.outputs.docs_only != 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -513,7 +525,7 @@ jobs:
 
   build-and-test-in-container:
     name: Build and test in container
-    needs: [precondition, check-typos]
+    needs: [precondition, check-typos, cache-kvrocks-deps]
     if: ${{ needs.precondition.outputs.docs_only != 'true' }}
     strategy:
       fail-fast: false
