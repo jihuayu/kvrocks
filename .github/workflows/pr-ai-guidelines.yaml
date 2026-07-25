@@ -30,7 +30,6 @@ jobs:
     name: Remind AI-assisted contribution guidelines
     runs-on: ubuntu-latest
     if: >
-      github.repository_owner == 'apache' &&
       github.event.pull_request.user.type != 'Bot'
     steps:
       - name: Check merged PR count and comment if needed
