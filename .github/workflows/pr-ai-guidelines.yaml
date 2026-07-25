@@ -32,7 +32,7 @@ jobs:
     if: >
       github.event.pull_request.user.type != 'Bot'
     steps:
-      - name: Check merged PR count and comment if needed
+      - name: Check recent merged PRs and comment if needed
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
@@ -45,19 +45,20 @@ jobs:
           # current repository is a fork (e.g. personal forks used for testing).
           # Otherwise count against the current repository itself.
           COUNT_REPO=$(gh api "repos/${REPO}" --jq '.parent.full_name // .full_name')
+          ONE_YEAR_AGO=$(date -u -d '1 year ago' +%Y-%m-%d)
 
-          MERGED_COUNT=$(gh search prs \
+          RECENT_MERGED_COUNT=$(gh search prs \
             --repo "${COUNT_REPO}" \
             --author "${AUTHOR}" \
-            --merged \
-            --limit 3 \
+            --merged-at ">=${ONE_YEAR_AGO}" \
+            --limit 1 \
             --json number \
             --jq 'length')
 
-          echo "Author ${AUTHOR} has at least ${MERGED_COUNT} merged PR(s) in ${COUNT_REPO} (capped at 3)"
+          echo "Author ${AUTHOR} has ${RECENT_MERGED_COUNT} merged PR(s) in ${COUNT_REPO} since ${ONE_YEAR_AGO} (capped at 1)"
 
-          if [ "${MERGED_COUNT}" -ge 3 ]; then
-            echo "Skipping comment: author already has 3 or more merged PRs"
+          if [ "${RECENT_MERGED_COUNT}" -gt 0 ]; then
+            echo "Skipping comment: author has at least one PR merged within the past year"
             exit 0
           fi
 
