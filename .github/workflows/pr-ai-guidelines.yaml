@@ -41,15 +41,20 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Count merged PRs against the upstream project repository when the
+          # current repository is a fork (e.g. personal forks used for testing).
+          # Otherwise count against the current repository itself.
+          COUNT_REPO=$(gh api "repos/${REPO}" --jq '.parent.full_name // .full_name')
+
           MERGED_COUNT=$(gh search prs \
-            --repo "${REPO}" \
+            --repo "${COUNT_REPO}" \
             --author "${AUTHOR}" \
             --merged \
             --limit 3 \
             --json number \
             --jq 'length')
 
-          echo "Author ${AUTHOR} has at least ${MERGED_COUNT} merged PR(s) in ${REPO} (capped at 3)"
+          echo "Author ${AUTHOR} has at least ${MERGED_COUNT} merged PR(s) in ${COUNT_REPO} (capped at 3)"
 
           if [ "${MERGED_COUNT}" -ge 3 ]; then
             echo "Skipping comment: author already has 3 or more merged PRs"
