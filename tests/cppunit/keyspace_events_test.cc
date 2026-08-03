@@ -24,47 +24,96 @@
 
 #include "config/config.h"
 
-TEST(KeyspaceEvents, CollectorRequiresEventClassAndChannel) {
-  KeyspaceEventCollector no_channel("tenant", kNotifyString);
+TEST(KeyspaceEvents, JournalRequiresEventClassAndChannel) {
+  KeyspaceEventJournal no_channel("tenant", kNotifyString);
   EXPECT_FALSE(ShouldNotifyKeyspaceEvent(kNotifyString, kNotifyString));
   no_channel.Add(kNotifyString, "set", "key");
-  EXPECT_TRUE(no_channel.Take().empty());
+  EXPECT_EQ(no_channel.Mark(), 0U);
 
-  KeyspaceEventCollector no_event_class("tenant", kNotifyKeyspace);
+  KeyspaceEventJournal no_event_class("tenant", kNotifyKeyspace);
   EXPECT_FALSE(ShouldNotifyKeyspaceEvent(kNotifyKeyspace, kNotifyString));
   no_event_class.Add(kNotifyString, "set", "key");
-  EXPECT_TRUE(no_event_class.Take().empty());
+  EXPECT_EQ(no_event_class.Mark(), 0U);
 }
 
-TEST(KeyspaceEvents, CollectorFiltersAndCapturesEvent) {
-  KeyspaceEventCollector collector("tenant", kNotifyKeyspace | kNotifyString);
+TEST(KeyspaceEvents, JournalFiltersAndCapturesEvent) {
+  KeyspaceEventJournal journal("tenant", kNotifyKeyspace | kNotifyString);
   EXPECT_TRUE(ShouldNotifyKeyspaceEvent(kNotifyKeyspace | kNotifyString, kNotifyString));
   EXPECT_FALSE(ShouldNotifyKeyspaceEvent(kNotifyKeyspace | kNotifyString, kNotifyGeneric));
 
-  collector.Add(kNotifyGeneric, "del", "ignored");
-  collector.Add(kNotifyString, "set", "key");
+  journal.Add(kNotifyGeneric, "del", "ignored");
+  journal.Add(kNotifyString, "set", "key");
 
-  auto events = collector.Take();
+  auto events = journal.TakeFrom(0);
   ASSERT_EQ(events.size(), 1);
-  EXPECT_EQ(events[0].channel_flags, kNotifyKeyspace);
+  EXPECT_EQ(events[0].type_flag, kNotifyString);
   EXPECT_EQ(events[0].event, "set");
   EXPECT_EQ(events[0].ns, "tenant");
   EXPECT_EQ(events[0].key, "key");
 }
 
-TEST(KeyspaceEvents, CollectorPreservesEventOrder) {
-  KeyspaceEventCollector collector("tenant", kNotifyKeyspace | kNotifyKeyevent | kNotifyAll);
-  collector.Add(kNotifyString, "set", "first");
-  collector.Add(kNotifyGeneric, "del", "second");
+TEST(KeyspaceEvents, JournalPreservesEventOrder) {
+  KeyspaceEventJournal journal("tenant", kNotifyKeyspace | kNotifyKeyevent | kNotifyAll);
+  journal.Add(kNotifyString, "set", "first");
+  journal.Add(kNotifyGeneric, "del", "second");
 
-  auto events = collector.Take();
+  auto events = journal.TakeFrom(0);
   ASSERT_EQ(events.size(), 2);
-  EXPECT_EQ(events[0].channel_flags, kNotifyKeyspace | kNotifyKeyevent);
+  EXPECT_EQ(events[0].type_flag, kNotifyString);
   EXPECT_EQ(events[0].event, "set");
   EXPECT_EQ(events[0].key, "first");
-  EXPECT_EQ(events[1].channel_flags, kNotifyKeyspace | kNotifyKeyevent);
+  EXPECT_EQ(events[1].type_flag, kNotifyGeneric);
   EXPECT_EQ(events[1].event, "del");
   EXPECT_EQ(events[1].key, "second");
+}
+
+TEST(KeyspaceEvents, JournalRollbackDiscardsEventsAfterMark) {
+  KeyspaceEventJournal journal("tenant", kNotifyKeyspace | kNotifyString);
+  journal.Add(kNotifyString, "set", "first");
+  const size_t mark = journal.Mark();
+
+  journal.Add(kNotifyString, "set", "second");
+  journal.Rollback(mark);
+
+  auto events = journal.TakeFrom(0);
+  ASSERT_EQ(events.size(), 1);
+  EXPECT_EQ(events[0].key, "first");
+}
+
+TEST(KeyspaceEvents, ScopeRollsBackOnFailure) {
+  KeyspaceEventJournal journal("tenant", kNotifyKeyspace | kNotifyString);
+  journal.Add(kNotifyString, "set", "first");
+  const size_t mark = journal.Mark();
+
+  {
+    KeyspaceEventScope scope(&journal);
+    journal.Add(kNotifyString, "set", "rolled-back");
+    EXPECT_EQ(journal.Mark(), mark + 1);
+  }
+
+  auto events = journal.TakeFrom(0);
+  ASSERT_EQ(events.size(), 1);
+  EXPECT_EQ(events[0].key, "first");
+}
+
+TEST(KeyspaceEvents, ScopeCommitKeepsEvents) {
+  KeyspaceEventJournal journal("tenant", kNotifyKeyspace | kNotifyString);
+  journal.Add(kNotifyString, "set", "first");
+  const size_t mark = journal.Mark();
+
+  std::vector<KeyspaceEvent> committed;
+  {
+    KeyspaceEventScope scope(&journal);
+    journal.Add(kNotifyString, "set", "second");
+    committed = scope.Commit();
+  }
+
+  ASSERT_EQ(committed.size(), 1);
+  EXPECT_EQ(committed[0].key, "second");
+
+  auto remaining = journal.TakeFrom(0);
+  ASSERT_EQ(remaining.size(), 1);
+  EXPECT_EQ(remaining[0].key, "first");
 }
 
 TEST(KeyspaceEvents, ParseFlags) {
