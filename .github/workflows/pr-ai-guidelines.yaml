@@ -28,7 +28,7 @@ permissions:
 jobs:
   remind:
     name: Remind AI-assisted contribution guidelines
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     if: >
       github.event.pull_request.user.type != 'Bot'
     steps:
