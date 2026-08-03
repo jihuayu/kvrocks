@@ -48,6 +48,25 @@
 
 namespace redis {
 
+namespace {
+
+class KeyspaceEventContextGuard {
+ public:
+  KeyspaceEventContextGuard(engine::Context &ctx, KeyspaceEventJournal *journal) : ctx_(ctx) {
+    ctx_.keyspace_event_journal = journal;
+  }
+  ~KeyspaceEventContextGuard() { ctx_.keyspace_event_journal = nullptr; }
+
+ private:
+  engine::Context &ctx_;
+};
+
+int GetKeyspaceChannelFlags(const Config *config) {
+  return config->notify_keyspace_events & (kNotifyKeyspace | kNotifyKeyevent);
+}
+
+}  // namespace
+
 Connection::Connection(bufferevent *bev, Worker *owner)
     : need_free_bev_(true), bev_(bev), req_(owner->srv), owner_(owner), srv_(owner->srv) {
   int64_t now = util::GetTimeStamp();
@@ -468,15 +487,24 @@ Status Connection::ExecuteCommand(engine::Context &ctx, const std::string &cmd_n
   auto start = std::chrono::high_resolution_clock::now();
   bool is_profiling = IsProfilingEnabled(cmd_name);
 
-  keyspace_event_notify_flags_ = srv_->GetConfig()->notify_keyspace_events;
-  active_keyspace_event_collector_.reset();
+  active_keyspace_event_journal_ =
+      std::make_unique<KeyspaceEventJournal>(GetNamespace(), srv_->GetConfig()->notify_keyspace_events);
+  KeyspaceEventContextGuard journal_guard(ctx, active_keyspace_event_journal_.get());
+  KeyspaceEventScope event_scope(active_keyspace_event_journal_.get());
 
   auto s = current_cmd->Execute(ctx, srv_, this, reply);
-  if (s.IsOK() && active_keyspace_event_collector_) {
-    queueOrPublishKeyspaceEvents(active_keyspace_event_collector_->Take());
+
+  std::vector<KeyspaceEvent> events;
+  if (s.IsOK()) {
+    events = event_scope.Commit();
   }
-  active_keyspace_event_collector_.reset();
-  keyspace_event_notify_flags_ = 0;
+  active_keyspace_event_journal_.reset();
+
+  if (!s.IsOK()) {
+    return s;
+  }
+
+  queueOrPublishKeyspaceEvents(std::move(events));
 
   auto end = std::chrono::high_resolution_clock::now();
   uint64_t duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
@@ -485,20 +513,6 @@ Status Connection::ExecuteCommand(engine::Context &ctx, const std::string &cmd_n
   srv_->SlowlogPushEntryIfNeeded(&cmd_tokens, duration, this);
   srv_->stats.IncrLatency(static_cast<uint64_t>(duration), cmd_name);
   return s;
-}
-
-bool Connection::IsKeyspaceEventEnabled(int type_flag) const {
-  return ShouldNotifyKeyspaceEvent(keyspace_event_notify_flags_, type_flag);
-}
-
-void Connection::AddKeyspaceEvent(int type_flag, std::string_view event, std::string_view key) {
-  if (!IsKeyspaceEventEnabled(type_flag)) return;
-
-  if (!active_keyspace_event_collector_) {
-    active_keyspace_event_collector_ =
-        std::make_unique<KeyspaceEventCollector>(GetNamespace(), keyspace_event_notify_flags_);
-  }
-  active_keyspace_event_collector_->Add(type_flag, event, key);
 }
 
 static bool IsCmdForIndexing(uint64_t cmd_flags, CommandCategory cmd_cat) {
@@ -745,14 +759,16 @@ void Connection::queueOrPublishKeyspaceEvents(std::vector<KeyspaceEvent> &&event
     return;
   }
 
+  const int channel_flags = GetKeyspaceChannelFlags(srv_->GetConfig());
   for (const auto &event : events) {
-    srv_->NotifyKeyspaceEvent(event.channel_flags, event.event, event.ns, event.key);
+    srv_->NotifyKeyspaceEvent(channel_flags, event.event, event.ns, event.key);
   }
 }
 
 void Connection::FlushKeyspaceEvents() {
+  const int channel_flags = GetKeyspaceChannelFlags(srv_->GetConfig());
   for (const auto &e : pending_keyspace_events_) {
-    srv_->NotifyKeyspaceEvent(e.channel_flags, e.event, e.ns, e.key);
+    srv_->NotifyKeyspaceEvent(channel_flags, e.event, e.ns, e.key);
   }
   pending_keyspace_events_.clear();
 }

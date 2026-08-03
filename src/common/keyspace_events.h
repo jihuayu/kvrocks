@@ -20,8 +20,10 @@
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "status.h"
@@ -39,24 +41,69 @@ enum NotifyKeyspaceEventFlag {
 bool ShouldNotifyKeyspaceEvent(int notify_flags, int type_flag);
 
 struct KeyspaceEvent {
-  int channel_flags;
+  int type_flag;
   std::string event;
   std::string ns;
   std::string key;
 };
 
-// Collects semantic keyspace events for one command; Connection owns publish timing.
-class KeyspaceEventCollector {
+// Request-scoped journal for semantic-layer keyspace events.
+// Connection owns publish timing and lifetime.
+class KeyspaceEventJournal {
  public:
-  KeyspaceEventCollector(std::string ns, int notify_flags);
-  void Add(int type_flag, std::string_view event, std::string_view key);
-  // Moves out events collected during Execute.
-  std::vector<KeyspaceEvent> Take();
+  KeyspaceEventJournal(std::string ns, int notify_flags)
+      : ns_(std::move(ns)), notify_flags_(notify_flags) {}
+
+  bool IsEnabled(int type_flag) const { return ShouldNotifyKeyspaceEvent(notify_flags_, type_flag); }
+
+  void Add(int type_flag, std::string_view event, std::string_view key) {
+    if (!IsEnabled(type_flag)) return;
+    events_.emplace_back(KeyspaceEvent{type_flag, std::string(event), ns_, std::string(key)});
+  }
+
+  size_t Mark() const { return events_.size(); }
+
+  void Rollback(size_t mark) { events_.resize(mark); }
+
+  std::vector<KeyspaceEvent> TakeFrom(size_t mark) {
+    std::vector<KeyspaceEvent> result;
+    result.reserve(events_.size() - mark);
+    for (size_t i = mark; i < events_.size(); ++i) {
+      result.emplace_back(std::move(events_[i]));
+    }
+    events_.resize(mark);
+    return result;
+  }
 
  private:
-  int notify_flags_;
   std::string ns_;
+  int notify_flags_ = 0;
   std::vector<KeyspaceEvent> events_;
+};
+
+// Rolls back journal events on failure unless Commit() is called.
+class KeyspaceEventScope {
+ public:
+  explicit KeyspaceEventScope(KeyspaceEventJournal *journal) : journal_(journal), mark_(journal ? journal->Mark() : 0) {}
+
+  ~KeyspaceEventScope() {
+    if (journal_ != nullptr && !committed_) {
+      journal_->Rollback(mark_);
+    }
+  }
+
+  std::vector<KeyspaceEvent> Commit() {
+    committed_ = true;
+    if (journal_ == nullptr) {
+      return {};
+    }
+    return journal_->TakeFrom(mark_);
+  }
+
+ private:
+  KeyspaceEventJournal *journal_;
+  size_t mark_;
+  bool committed_ = false;
 };
 
 // Parses notify-keyspace-events flags.
