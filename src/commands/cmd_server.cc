@@ -293,7 +293,7 @@ class CommandInfo : public Commander {
   }
 
   Status Execute([[maybe_unused]] engine::Context &ctx, Server *srv, Connection *conn, std::string *output) override {
-    auto info = srv->GetInfo(conn->GetNamespace(), sections_, format_);
+    auto info = srv->GetInfo(conn->GetNamespace(), conn->GetNamespaceStatsHandle(), sections_, format_);
     *output = conn->VerbatimString("txt", info);
     return Status::OK();
   }
@@ -1717,47 +1717,76 @@ class CommandLatency : public Commander {
 
  private:
   Status getHistogram(Server *srv, Connection *conn, std::string *output) {
-    if (srv->stats.bucket_boundaries.empty()) {
+    auto stats_handle = conn->GetNamespaceStatsHandle();
+    bool is_admin = conn->GetNamespace() == kDefaultNamespace;
+    const auto &bucket_boundaries =
+        is_admin ? srv->namespace_stats_registry.BucketBoundaries() : stats_handle->bucket_boundaries;
+
+    if (bucket_boundaries.empty()) {
       *output = conn->HeaderOfMap(0);
       return Status::OK();
     }
 
-    // Report the caller's namespace histogram; the admin/default namespace sees the aggregate.
-    auto stats_holder = conn->GetNamespace() == kDefaultNamespace
-                            ? srv->AggregateNamespaceStats()
-                            : srv->GetOrCreateNamespaceStats(conn->GetNamespace());
-    const Stats &cmd_stats = *stats_holder;
+    auto build_info = [&](const std::string &cmd, const Stats *stats) -> AggregatedCommandInfo {
+      AggregatedCommandInfo info;
+      if (stats == nullptr) return info;
 
-    std::vector<const std::pair<const std::string, CommandHistogram> *> target_histograms;
+      auto stat_it = stats->commands_stats.find(cmd);
+      if (stat_it != stats->commands_stats.end()) {
+        info.calls = stat_it->second.calls.load();
+        info.latency = stat_it->second.latency.load();
+      }
+
+      auto hist_it = stats->commands_histogram.find(cmd);
+      if (hist_it != stats->commands_histogram.end()) {
+        info.hist_calls = hist_it->second.calls.load();
+        info.hist_sum = hist_it->second.sum.load();
+        info.buckets.resize(hist_it->second.buckets.size());
+        for (std::size_t i = 0; i < hist_it->second.buckets.size(); ++i) {
+          info.buckets[i] = hist_it->second.buckets[i]->load();
+        }
+      }
+      return info;
+    };
+
+    std::vector<std::pair<std::string, AggregatedCommandInfo>> target_histograms;
     if (args_.size() > 2) {
       for (size_t i = 2; i < args_.size(); i++) {
-        auto it = cmd_stats.commands_histogram.find(util::ToLower(args_[i]));
-        if (it != cmd_stats.commands_histogram.end() && it->second.calls > 0) {
-          target_histograms.push_back(&(*it));
+        auto cmd = util::ToLower(args_[i]);
+        auto info =
+            is_admin ? srv->namespace_stats_registry.AggregateCommandInfo(cmd) : build_info(cmd, stats_handle.get());
+        if (info.hist_calls > 0) {
+          target_histograms.emplace_back(cmd, std::move(info));
         }
       }
     } else {
-      for (const auto &iter : cmd_stats.commands_histogram) {
-        if (iter.second.calls > 0) {
-          target_histograms.push_back(&iter);
+      if (is_admin) {
+        auto aggregate = srv->namespace_stats_registry.AggregateCommandInfo();
+        for (auto &entry : aggregate) {
+          if (entry.second.hist_calls > 0) {
+            target_histograms.emplace_back(entry.first, std::move(entry.second));
+          }
+        }
+      } else {
+        for (const auto &hist : stats_handle->commands_histogram) {
+          if (hist.second.calls > 0) {
+            target_histograms.emplace_back(hist.first, build_info(hist.first, stats_handle.get()));
+          }
         }
       }
     }
 
     *output = conn->HeaderOfMap(target_histograms.size());
-    for (const auto *pair_ptr : target_histograms) {
-      const auto &cmd_name = pair_ptr->first;
-      const auto &hist = pair_ptr->second;
-
+    for (const auto &[cmd_name, info] : target_histograms) {
       std::vector<std::pair<int64_t, uint64_t>> cumulative_buckets;
       uint64_t cumulative = 0;
-      for (size_t i = 0; i < hist.buckets.size(); i++) {
-        cumulative += hist.buckets[i]->load(std::memory_order_relaxed);
+      for (std::size_t i = 0; i < info.buckets.size(); i++) {
+        cumulative += info.buckets[i];
         if (cumulative == 0) continue;
 
         int64_t boundary = 0;
-        if (i < cmd_stats.bucket_boundaries.size()) {
-          boundary = static_cast<int64_t>(cmd_stats.bucket_boundaries[i]);
+        if (i < bucket_boundaries.size()) {
+          boundary = static_cast<int64_t>(bucket_boundaries[i]);
         } else {
           boundary = -1;
         }
@@ -1768,7 +1797,7 @@ class CommandLatency : public Commander {
       *output += conn->HeaderOfMap(2);
 
       *output += redis::BulkString("calls");
-      *output += redis::Integer(hist.calls.load(std::memory_order_relaxed));
+      *output += redis::Integer(info.hist_calls);
 
       *output += redis::BulkString("histogram_usec");
       *output += conn->HeaderOfMap(cumulative_buckets.size());

@@ -52,12 +52,12 @@ Connection::Connection(bufferevent *bev, Worker *owner)
   int64_t now = util::GetTimeStamp();
   create_time_ = now;
   last_interaction_ = now;
-  cached_ns_stats_ = srv_->GetOrCreateNamespaceStats(kDefaultNamespace);
+  cached_ns_stats_ = srv_->namespace_stats_registry.GetOrCreate(kDefaultNamespace);
 }
 
 void Connection::SetNamespace(std::string ns) {
   ns_ = std::move(ns);
-  cached_ns_stats_ = srv_->GetOrCreateNamespaceStats(ns_);
+  cached_ns_stats_ = srv_->namespace_stats_registry.GetOrCreate(ns_);
 }
 
 Connection::~Connection() {

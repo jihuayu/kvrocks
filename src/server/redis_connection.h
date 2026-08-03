@@ -166,6 +166,8 @@ class Connection : public EvbufCallbackBase<Connection> {
   std::string GetNamespace() const { return ns_; }
   void SetNamespace(std::string ns);
 
+  std::shared_ptr<Stats> GetNamespaceStatsHandle() const { return cached_ns_stats_; }
+
   void NeedFreeBufferEvent(bool need_free = true) { need_free_bev_ = need_free; }
   void NeedNotFreeBufferEvent() { NeedFreeBufferEvent(false); }
   bool IsNeedFreeBufferEvent() const { return need_free_bev_; }

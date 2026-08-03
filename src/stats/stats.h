@@ -28,6 +28,7 @@
 #include <memory>
 #include <shared_mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 enum StatsMetricFlags {
@@ -47,12 +48,16 @@ constexpr int STATS_METRIC_SAMPLES = 16;  // Number of samples per metric
 
 // Experimental part to support histograms for cmd statistics
 struct CommandHistogram {
+  CommandHistogram() : calls(0), sum(0) {}
+
   std::vector<std::unique_ptr<std::atomic<uint64_t>>> buckets;
   std::atomic<uint64_t> calls;
   std::atomic<uint64_t> sum;
 };
 
 struct CommandStat {
+  CommandStat() : calls(0), latency(0) {}
+
   std::atomic<uint64_t> calls;
   std::atomic<uint64_t> latency;
 };
@@ -84,6 +89,8 @@ class Stats {
 
   explicit Stats(std::vector<double> histogram_bucket_boundaries);
 
+  void InitCommandStats(const std::vector<std::string> &commands);
+
   void IncrCalls(const std::string &command_name);
   void IncrLatency(uint64_t latency, const std::string &command_name);
   void IncrInboundBytes(uint64_t bytes) { in_bytes.fetch_add(bytes, std::memory_order_relaxed); }
@@ -94,4 +101,44 @@ class Stats {
   static int64_t GetMemoryRSS();
   void TrackInstantaneousMetric(int metric, uint64_t current_reading);
   uint64_t GetInstantaneousMetric(int metric) const;
+};
+
+struct AggregatedCommandInfo {
+  uint64_t calls = 0;
+  uint64_t latency = 0;
+  uint64_t hist_calls = 0;
+  uint64_t hist_sum = 0;
+  std::vector<uint64_t> buckets;
+};
+
+class NamespaceStatsRegistry {
+ public:
+  using Table = std::unordered_map<std::string, std::shared_ptr<Stats>>;
+  using Snapshot = std::shared_ptr<const Table>;
+
+  NamespaceStatsRegistry(std::vector<std::string> commands, std::vector<double> bucket_boundaries);
+
+  std::shared_ptr<Stats> Find(const std::string &ns) const;
+  std::shared_ptr<Stats> GetOrCreate(const std::string &ns);
+
+  Snapshot GetSnapshot() const;
+
+  uint64_t AggregateTotalCalls() const;
+  uint64_t AggregateInstantaneousOps() const;
+  AggregatedCommandInfo AggregateCommandInfo(const std::string &command) const;
+  std::map<std::string, AggregatedCommandInfo> AggregateCommandInfo() const;
+
+  const auto &BucketBoundaries() const { return bucket_boundaries_; }
+
+  void TrackInstantaneousMetrics() const;
+
+ private:
+  std::vector<std::string> commands_;
+  std::vector<double> bucket_boundaries_;
+
+  // Immutable snapshot of the namespace -> Stats map.
+  Snapshot snapshot_;
+
+  // Only namespace creation enters this lock.
+  std::mutex writer_mu_;
 };

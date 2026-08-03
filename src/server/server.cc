@@ -57,17 +57,25 @@
 #include "version.h"
 #include "worker.h"
 
+static std::vector<std::string> GetCommandNames() {
+  auto commands = redis::CommandTable::GetOriginal();
+  std::vector<std::string> names;
+  names.reserve(commands->size());
+  for (const auto &iter : *commands) {
+    names.emplace_back(iter.first);
+  }
+  return names;
+}
+
 Server::Server(engine::Storage *storage, Config *config)
     : stats(config->histogram_bucket_boundaries),
+      namespace_stats_registry(GetCommandNames(), config->histogram_bucket_boundaries),
       storage(storage),
       indexer(storage),
       index_mgr(&indexer, storage),
       start_time_secs_(util::GetTimeStamp()),
       config_(config),
       namespace_(storage) {
-  // init commands stats here to prevent concurrent insert, and cause core
-  initCommandStats(&stats);
-
   // init cursor_dict_
   cursor_dict_ = std::make_unique<CursorDictType>();
 
@@ -858,18 +866,7 @@ uint64_t Server::GetClientID() { return client_id_.fetch_add(1, std::memory_orde
 
 void Server::recordInstantaneousMetrics() {
   auto rocksdb_stats = storage->GetDB()->GetDBOptions().statistics;
-  // Sample each namespace's command metric, and feed the sum into the global metric so the
-  // admin/default view reports aggregate ops/sec without keeping a global command counter on the hot path.
-  uint64_t total_calls = 0;
-  {
-    std::shared_lock<std::shared_mutex> lock(ns_stats_mu_);
-    for (const auto &[ns, ns_stats] : ns_stats_) {
-      auto calls = ns_stats->total_calls.load();
-      ns_stats->TrackInstantaneousMetric(STATS_METRIC_COMMAND, calls);
-      total_calls += calls;
-    }
-  }
-  stats.TrackInstantaneousMetric(STATS_METRIC_COMMAND, total_calls);
+  namespace_stats_registry.TrackInstantaneousMetrics();
   stats.TrackInstantaneousMetric(STATS_METRIC_NET_INPUT, stats.in_bytes);
   stats.TrackInstantaneousMetric(STATS_METRIC_NET_OUTPUT, stats.out_bytes);
   stats.TrackInstantaneousMetric(STATS_METRIC_ROCKSDB_PUT,
@@ -1389,74 +1386,20 @@ int64_t Server::GetLastBgsaveTime() {
   return last_bgsave_timestamp_secs_ == -1 ? start_time_secs_ : last_bgsave_timestamp_secs_;
 }
 
-void Server::initCommandStats(Stats *stats) {
-  auto commands = redis::CommandTable::GetOriginal();
-  for (const auto &iter : *commands) {
-    stats->commands_stats[iter.first].calls = 0;
-    stats->commands_stats[iter.first].latency = 0;
-
-    if (stats->bucket_boundaries.size() > 0) {
-      // NB: Extra index for the last bucket (Inf)
-      for (std::size_t i{0}; i <= stats->bucket_boundaries.size(); ++i) {
-        stats->commands_histogram[iter.first].buckets.push_back(std::make_unique<std::atomic<uint64_t>>(0));
-      }
-      stats->commands_histogram[iter.first].calls = 0;
-      stats->commands_histogram[iter.first].sum = 0;
-    }
+Server::InfoEntries Server::GetStatsInfo(const std::shared_ptr<Stats> &stats_handle) {
+  uint64_t total_calls = 0;
+  uint64_t ops_per_sec = 0;
+  if (stats_handle) {
+    total_calls = stats_handle->total_calls.load(std::memory_order_relaxed);
+    ops_per_sec = stats_handle->GetInstantaneousMetric(STATS_METRIC_COMMAND);
+  } else {
+    total_calls = namespace_stats_registry.AggregateTotalCalls();
+    ops_per_sec = namespace_stats_registry.AggregateInstantaneousOps();
   }
-}
-
-std::shared_ptr<Stats> Server::GetOrCreateNamespaceStats(const std::string &ns) {
-  {
-    std::shared_lock<std::shared_mutex> lock(ns_stats_mu_);
-    if (auto it = ns_stats_.find(ns); it != ns_stats_.end()) {
-      return it->second;
-    }
-  }
-
-  std::unique_lock<std::shared_mutex> lock(ns_stats_mu_);
-  if (auto it = ns_stats_.find(ns); it != ns_stats_.end()) {
-    return it->second;
-  }
-  auto ns_stats = std::make_shared<Stats>(config_->histogram_bucket_boundaries);
-  initCommandStats(ns_stats.get());
-  ns_stats_[ns] = ns_stats;
-  return ns_stats;
-}
-
-std::shared_ptr<Stats> Server::AggregateNamespaceStats() {
-  auto agg = std::make_shared<Stats>(config_->histogram_bucket_boundaries);
-  initCommandStats(agg.get());
-
-  std::shared_lock<std::shared_mutex> lock(ns_stats_mu_);
-  for (const auto &[ns, ns_stats] : ns_stats_) {
-    agg->total_calls.fetch_add(ns_stats->total_calls.load(), std::memory_order_relaxed);
-    for (const auto &[cmd, stat] : ns_stats->commands_stats) {
-      agg->commands_stats[cmd].calls.fetch_add(stat.calls.load(), std::memory_order_relaxed);
-      agg->commands_stats[cmd].latency.fetch_add(stat.latency.load(), std::memory_order_relaxed);
-    }
-    for (const auto &[cmd, hist] : ns_stats->commands_histogram) {
-      auto &agg_hist = agg->commands_histogram[cmd];
-      agg_hist.calls.fetch_add(hist.calls.load(), std::memory_order_relaxed);
-      agg_hist.sum.fetch_add(hist.sum.load(), std::memory_order_relaxed);
-      for (std::size_t i = 0; i < hist.buckets.size(); ++i) {
-        agg_hist.buckets[i]->fetch_add(hist.buckets[i]->load(), std::memory_order_relaxed);
-      }
-    }
-  }
-  return agg;
-}
-
-Server::InfoEntries Server::GetStatsInfo(const std::string &ns) {
-  // Command stats are per namespace; the admin/default namespace sees the aggregate across all of them.
-  auto cmd_stats_ptr = ns == kDefaultNamespace ? AggregateNamespaceStats() : GetOrCreateNamespaceStats(ns);
-  const Stats &cmd_stats = *cmd_stats_ptr;
 
   Server::InfoEntries entries;
   entries.emplace_back("total_connections_received", total_clients_.load());
-  entries.emplace_back("total_commands_processed", cmd_stats.total_calls.load());
-  auto ops_per_sec = ns == kDefaultNamespace ? stats.GetInstantaneousMetric(STATS_METRIC_COMMAND)
-                                             : cmd_stats.GetInstantaneousMetric(STATS_METRIC_COMMAND);
+  entries.emplace_back("total_commands_processed", total_calls);
   entries.emplace_back("instantaneous_ops_per_sec", ops_per_sec);
   entries.emplace_back("total_net_input_bytes", stats.in_bytes.load());
   entries.emplace_back("total_net_output_bytes", stats.out_bytes.load());
@@ -1481,41 +1424,70 @@ Server::InfoEntries Server::GetStatsInfo(const std::string &ns) {
   return entries;
 }
 
-Server::InfoEntries Server::GetCommandsStatsInfo(const std::string &ns) {
-  auto cmd_stats_ptr = ns == kDefaultNamespace ? AggregateNamespaceStats() : GetOrCreateNamespaceStats(ns);
-  const Stats &cmd_stats = *cmd_stats_ptr;
-
+Server::InfoEntries Server::GetCommandsStatsInfo(const std::shared_ptr<Stats> &stats_handle) const {
   InfoEntries entries;
 
-  for (const auto &cmd_stat : cmd_stats.commands_stats) {
-    auto calls = cmd_stat.second.calls.load();
-    if (calls == 0) continue;
+  if (stats_handle) {
+    for (const auto &cmd_stat : stats_handle->commands_stats) {
+      auto calls = cmd_stat.second.calls.load();
+      if (calls == 0) continue;
 
-    auto latency = cmd_stat.second.latency.load();
-    entries.emplace_back("cmdstat_" + cmd_stat.first,
-                         fmt::format("calls={},usec={},usec_per_call={}", calls, latency,
-                                     static_cast<double>(latency) / static_cast<double>(calls)));
-  }
-
-  for (const auto &cmd_hist : cmd_stats.commands_histogram) {
-    auto command_name = cmd_hist.first;
-    auto calls = cmd_hist.second.calls.load();
-    if (calls == 0) continue;
-
-    auto sum = cmd_hist.second.sum.load();
-    std::string result;
-    for (std::size_t i{0}; i < cmd_hist.second.buckets.size(); ++i) {
-      auto bucket_value = cmd_hist.second.buckets[i]->load();
-      auto bucket_bound = std::numeric_limits<double>::infinity();
-      if (i < cmd_stats.bucket_boundaries.size()) {
-        bucket_bound = cmd_stats.bucket_boundaries[i];
-      }
-
-      result.append(fmt::format("{}={},", bucket_bound, bucket_value));
+      auto latency = cmd_stat.second.latency.load();
+      entries.emplace_back("cmdstat_" + cmd_stat.first,
+                           fmt::format("calls={},usec={},usec_per_call={}", calls, latency,
+                                       static_cast<double>(latency) / static_cast<double>(calls)));
     }
-    result.append(fmt::format("sum={},count={}", sum, calls));
 
-    entries.emplace_back("cmdstathist_" + command_name, result);
+    for (const auto &cmd_hist : stats_handle->commands_histogram) {
+      auto command_name = cmd_hist.first;
+      auto calls = cmd_hist.second.calls.load();
+      if (calls == 0) continue;
+
+      auto sum = cmd_hist.second.sum.load();
+      std::string result;
+      for (std::size_t i{0}; i < cmd_hist.second.buckets.size(); ++i) {
+        auto bucket_value = cmd_hist.second.buckets[i]->load();
+        auto bucket_bound = std::numeric_limits<double>::infinity();
+        if (i < stats_handle->bucket_boundaries.size()) {
+          bucket_bound = stats_handle->bucket_boundaries[i];
+        }
+
+        result.append(fmt::format("{}={},", bucket_bound, bucket_value));
+      }
+      result.append(fmt::format("sum={},count={}", sum, calls));
+
+      entries.emplace_back("cmdstathist_" + command_name, result);
+    }
+  } else {
+    auto aggregate = namespace_stats_registry.AggregateCommandInfo();
+    const auto &bucket_boundaries = namespace_stats_registry.BucketBoundaries();
+
+    for (const auto &cmd_stat : aggregate) {
+      if (cmd_stat.second.calls == 0) continue;
+
+      entries.emplace_back(
+          "cmdstat_" + cmd_stat.first,
+          fmt::format("calls={},usec={},usec_per_call={}", cmd_stat.second.calls, cmd_stat.second.latency,
+                      static_cast<double>(cmd_stat.second.latency) / static_cast<double>(cmd_stat.second.calls)));
+    }
+
+    for (const auto &cmd_hist : aggregate) {
+      if (cmd_hist.second.hist_calls == 0) continue;
+
+      std::string result;
+      for (std::size_t i{0}; i < cmd_hist.second.buckets.size(); ++i) {
+        auto bucket_value = cmd_hist.second.buckets[i];
+        auto bucket_bound = std::numeric_limits<double>::infinity();
+        if (i < bucket_boundaries.size()) {
+          bucket_bound = bucket_boundaries[i];
+        }
+
+        result.append(fmt::format("{}={},", bucket_bound, bucket_value));
+      }
+      result.append(fmt::format("sum={},count={}", cmd_hist.second.hist_sum, cmd_hist.second.hist_calls));
+
+      entries.emplace_back("cmdstathist_" + cmd_hist.first, result);
+    }
   }
 
   return entries;
@@ -1601,16 +1573,20 @@ Server::InfoEntries Server::GetKeyspaceInfo(const std::string &ns) {
 // DB is closed and the pointer is invalid. Server may crash if we access DB during loading.
 // If you add new fields which access DB into INFO command output, make sure
 // this section can't be shown when loading(i.e. !is_loading_).
-std::string Server::GetInfo(const std::string &ns, const std::vector<std::string> &sections, InfoFormat format) {
+std::string Server::GetInfo(const std::string &ns, std::shared_ptr<Stats> stats_handle,
+                            const std::vector<std::string> &sections, InfoFormat format) {
+  // The admin/default namespace sees aggregate stats; a named namespace sees its own cached view.
+  std::shared_ptr<Stats> effective_handle = (ns == kDefaultNamespace) ? nullptr : std::move(stats_handle);
+
   std::vector<std::pair<std::string, std::function<InfoEntries(Server *)>>> info_funcs = {
       {"Server", &Server::GetServerInfo},
       {"Clients", &Server::GetClientsInfo},
       {"Memory", &Server::GetMemoryInfo},
       {"Persistence", &Server::GetPersistenceInfo},
-      {"Stats", [&ns](Server *srv) { return srv->GetStatsInfo(ns); }},
+      {"Stats", [effective_handle](Server *srv) { return srv->GetStatsInfo(effective_handle); }},
       {"Replication", &Server::GetReplicationInfo},
       {"CPU", &Server::GetCpuInfo},
-      {"CommandStats", [&ns](Server *srv) { return srv->GetCommandsStatsInfo(ns); }},
+      {"CommandStats", [effective_handle](Server *srv) { return srv->GetCommandsStatsInfo(effective_handle); }},
       {"Cluster", &Server::GetClusterInfo},
       {"Keyspace", [&ns](Server *srv) { return srv->GetKeyspaceInfo(ns); }},
       {"RocksDB", &Server::GetRocksDBInfo},
@@ -1666,7 +1642,7 @@ std::string Server::GetRocksDBStatsJson() const {
     /* P50 P95 P99 P100 COUNT SUM */
     stats_json[iter.second] =
         jsoncons::json(jsoncons::json_array_arg, {hist_data.median, hist_data.percentile95, hist_data.percentile99,
-                                                  hist_data.max, hist_data.count, hist_data.sum});
+                                                  hist_data.max, hist_data.count, hist_data.sum});  // NOLINT
   }
 
   return stats_json.to_string();

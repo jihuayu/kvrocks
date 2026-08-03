@@ -301,24 +301,21 @@ class Server {
   };
   using InfoEntries = std::vector<InfoEntry>;
 
-  InfoEntries GetStatsInfo(const std::string &ns);
+  InfoEntries GetStatsInfo(const std::shared_ptr<Stats> &stats_handle);
   InfoEntries GetServerInfo();
   InfoEntries GetMemoryInfo();
   InfoEntries GetRocksDBInfo();
   InfoEntries GetClientsInfo();
   InfoEntries GetReplicationInfo();
-  InfoEntries GetCommandsStatsInfo(const std::string &ns);
+  InfoEntries GetCommandsStatsInfo(const std::shared_ptr<Stats> &stats_handle) const;
   InfoEntries GetClusterInfo();
   InfoEntries GetPersistenceInfo();
   InfoEntries GetCpuInfo();
   InfoEntries GetKeyspaceInfo(const std::string &ns);
 
-  std::shared_ptr<Stats> GetOrCreateNamespaceStats(const std::string &ns);
-  std::shared_ptr<Stats> AggregateNamespaceStats();
-
   enum class InfoFormat { Text, Json };
-  std::string GetInfo(const std::string &ns, const std::vector<std::string> &sections,
-                      InfoFormat format = InfoFormat::Text);
+  std::string GetInfo(const std::string &ns, std::shared_ptr<Stats> stats_handle,
+                      const std::vector<std::string> &sections, InfoFormat format = InfoFormat::Text);
   std::string GetRocksDBStatsJson() const;
   ReplState GetReplicationState();
 
@@ -375,6 +372,7 @@ class Server {
   void RemovePausedConn(redis::Connection *conn);
 
   Stats stats;
+  NamespaceStatsRegistry namespace_stats_registry;
   engine::Storage *storage;
   MemoryProfiler memory_profiler;
   std::unique_ptr<Cluster> cluster;
@@ -446,13 +444,6 @@ class Server {
   int64_t last_bgsave_duration_secs_ = -1;
 
   std::map<std::string, DBScanInfo> db_scan_infos_;
-
-  // Per-namespace command statistics (keyed by namespace name), guarded by ns_stats_mu_. The global
-  // `stats` keeps the non-namespaced counters (net bytes, replication) and the sampled aggregate ops/sec.
-  std::unordered_map<std::string, std::shared_ptr<Stats>> ns_stats_;
-  std::shared_mutex ns_stats_mu_;
-  // Pre-populate a Stats' per-command maps so no runtime map insertion (and thus no data race) happens.
-  static void initCommandStats(Stats *stats);
 
   LogCollector<SlowEntry> slow_log_;
   LogCollector<PerfEntry> perf_log_;
