@@ -68,6 +68,6 @@ jobs:
             "" \
             "Thank you for your pull request. Please review our [Contributing Guide](${CONTRIBUTING_URL})." \
             "" \
-            "We expect contributors to understand their changes and show their own reasoning in each pull request. Low-quality pull requests may be closed.")
+            "Please make sure you understand your changes and explain your reasoning in this pull request. Low-quality pull requests may be closed.")
 
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${BODY}"
