@@ -62,12 +62,12 @@ jobs:
             exit 0
           fi
 
-          GUIDELINES_URL="https://kvrocks.apache.org/community/contributing/#guidelines-for-ai-assisted-contributions"
+          CONTRIBUTING_URL="https://kvrocks.apache.org/community/contributing/"
           BODY=$(printf '%s\n' \
             "Hi @${AUTHOR}," \
             "" \
-            "Thank you for your pull request. Please review our [Guidelines for AI-assisted Contributions](${GUIDELINES_URL})." \
+            "Thank you for your pull request. Please review our [Contributing Guide](${CONTRIBUTING_URL})." \
             "" \
-            "Pull requests that do not follow these guidelines may be closed. If you believe this decision was made in error, feel free to reopen the PR.")
+            "We expect contributors to understand their changes and show their own reasoning in each pull request. Low-quality pull requests may be closed.")
 
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body "${BODY}"
