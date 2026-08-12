@@ -32,7 +32,7 @@ env:
 
 jobs:
   diagnose:
-    name: Compare repeated process profile writes
+    name: Verify single-build profile isolation
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -60,108 +60,106 @@ jobs:
           python-version: 3.x
 
       - name: Install diagnostic tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y redis-tools
-          pip install gcovr==5.0
+        run: pip install gcovr==5.0
 
-      - name: Build coverage binary
-        run: |
-          ./x.py build --skip-build --compiler gcc -DCMAKE_CXX_FLAGS=--coverage --dep-dir ${{ env.KVROCKS_DEPS_CACHE_DIR }}
-          cmake --build build --parallel $(nproc) --target kvrocks
+      - name: Configure coverage build
+        run: ./x.py build --skip-build --compiler gcc -DCMAKE_CXX_FLAGS=--coverage --dep-dir ${{ env.KVROCKS_DEPS_CACHE_DIR }}
 
-      - name: Run repeated servers sequentially
+      - name: Build kvrocks and unittest sequentially
         shell: bash
         run: |
           set -euo pipefail
-          base_dir="${RUNNER_TEMP}/kvrocks-coverage-sequential"
-          mkdir -p "${base_dir}"
 
-          for instance in $(seq 1 61); do
-            run_dir="${base_dir}/${instance}"
-            mkdir -p "${run_dir}"
-            ./build/kvrocks               --bind 127.0.0.1               --port 56666               --dir "${run_dir}"               --log-dir stderr               > "${run_dir}/stdout" 2> "${run_dir}/stderr" &
-            kvrocks_pid=$!
+          started=${SECONDS}
+          cmake --build build --parallel "$(nproc)" --target kvrocks
+          printf 'build_kvrocks_seconds\t%s\n' "$((SECONDS - started))" | tee build-times.tsv
 
-            ready=false
-            for _ in {1..120}; do
-              if redis-cli -h 127.0.0.1 -p 56666 ping >/dev/null 2>&1; then
-                ready=true
-                break
-              fi
-              sleep 0.1
-            done
-            test "${ready}" = true
+          find build/CMakeFiles/kvrocks_objs.dir -type f \
+            \( -name '*.o' -o -name '*.gcno' \) -print0 \
+            | sort -z | xargs -0 sha256sum > kvrocks-objs-before-unittest.sha256
 
-            test "$(redis-cli -h 127.0.0.1 -p 56666 hset codex-coverage field value)" = 1
-            test "$(redis-cli -h 127.0.0.1 -p 56666 hget codex-coverage field)" = value
-            kill -TERM "${kvrocks_pid}"
-            wait "${kvrocks_pid}"
-          done
+          started=${SECONDS}
+          cmake --build build --parallel "$(nproc)" --target unittest
+          printf 'build_unittest_incremental_seconds\t%s\n' "$((SECONDS - started))" | tee -a build-times.tsv
 
-      - name: Capture sequential profile
-        run: |
-          gcovr --root . --filter '^src/' --json -o sequential.json
-          find build -name '*.gcda' -printf '%s\t%p\n' | sort > sequential-profiles.txt
-          find "${RUNNER_TEMP}/kvrocks-coverage-sequential" -name stderr -exec grep -H 'libgcov' {} + > sequential-libgcov-errors.txt || true
+          find build/CMakeFiles/kvrocks_objs.dir -type f \
+            \( -name '*.o' -o -name '*.gcno' \) -print0 \
+            | sort -z | xargs -0 sha256sum > kvrocks-objs-after-unittest.sha256
 
-      - name: Run servers concurrently
-        shell: bash
-        run: |
-          set -euo pipefail
-          find build -name '*.gcda' -delete
-          base_dir="${RUNNER_TEMP}/kvrocks-coverage-concurrent"
-          mkdir -p "${base_dir}"
-          declare -a pids=()
+          if diff -u kvrocks-objs-before-unittest.sha256 kvrocks-objs-after-unittest.sha256 > kvrocks-objs.diff; then
+            printf 'kvrocks_objs_rebuilt\tfalse\n' | tee -a build-times.tsv
+          else
+            printf 'kvrocks_objs_rebuilt\ttrue\n' | tee -a build-times.tsv
+            cat kvrocks-objs.diff
+          fi
 
-          for instance in $(seq 1 16); do
-            port=$((57000 + instance))
-            run_dir="${base_dir}/${instance}"
-            mkdir -p "${run_dir}"
-            ./build/kvrocks               --bind 127.0.0.1               --port "${port}"               --dir "${run_dir}"               --log-dir stderr               > "${run_dir}/stdout" 2> "${run_dir}/stderr" &
-            pids+=("$!")
-          done
-
-          for instance in $(seq 1 16); do
-            port=$((57000 + instance))
-            ready=false
-            for _ in {1..120}; do
-              if redis-cli -h 127.0.0.1 -p "${port}" ping >/dev/null 2>&1; then
-                ready=true
-                break
-              fi
-              sleep 0.1
-            done
-            test "${ready}" = true
-            test "$(redis-cli -h 127.0.0.1 -p "${port}" hset codex-coverage field value)" = 1
-            test "$(redis-cli -h 127.0.0.1 -p "${port}" hget codex-coverage field)" = value
-          done
-
-          for pid in "${pids[@]}"; do kill -TERM "${pid}"; done
-          for pid in "${pids[@]}"; do wait "${pid}"; done
-
-      - name: Capture concurrent profile
-        run: |
-          gcovr --root . --filter '^src/' --json -o concurrent.json
-          find build -name '*.gcda' -printf '%s\t%p\n' | sort > concurrent-profiles.txt
-          find "${RUNNER_TEMP}/kvrocks-coverage-concurrent" -name stderr -exec grep -H 'libgcov' {} + > concurrent-libgcov-errors.txt || true
-
-      - name: Run isolated Go hash package
+      - name: Run Go hash package after both targets are built
         working-directory: tests/gocase
         run: |
           find "${GITHUB_WORKSPACE}/build" -name '*.gcda' -delete
           mkdir -p workspace
-          go test -count=1 -timeout=600s ./unit/type/hash             -binPath="${GITHUB_WORKSPACE}/build/kvrocks"             -cliPath=redis-cli             -workspace="${GITHUB_WORKSPACE}/tests/gocase/workspace"             -parallel 2
+          go test -count=1 -timeout=600s ./unit/type/hash \
+            -binPath="${GITHUB_WORKSPACE}/build/kvrocks" \
+            -cliPath=redis-cli \
+            -workspace="${GITHUB_WORKSPACE}/tests/gocase/workspace" \
+            -parallel 2
 
-      - name: Capture Go package profile and errors
+      - name: Capture non-isolated Go profile
+        run: |
+          gcovr --root . --filter '^src/' --json -o go-after-both-built.json
+          find build -name '*.gcda' -printf '%s\t%p\n' | sort > go-after-both-built-profiles.txt
+
+      - name: Run C++ tests in an isolated profile directory
         shell: bash
         run: |
-          gcovr --root . --filter '^src/' --json -o go-hash.json
-          find build -name '*.gcda' -printf '%s\t%p\n' | sort > go-hash-profiles.txt
-          find tests/gocase/workspace -name stderr -exec grep -H 'libgcov' {} + > go-hash-libgcov-errors.txt || true
-          find tests/gocase/workspace -name stderr -exec sh -c 'for log_file do printf "===== %s\n" "${log_file}"; cat "${log_file}"; done' sh {} + > go-hash-server-stderr.txt
+          set -euo pipefail
+          find build -name '*.gcda' -delete
+          mkdir -p profiles/cpp
+          profile_strip=$(awk -F/ '{print NF - 1}' <<< "${GITHUB_WORKSPACE}")
+          started=${SECONDS}
+          GCOV_PREFIX="${GITHUB_WORKSPACE}/profiles/cpp" \
+          GCOV_PREFIX_STRIP="${profile_strip}" \
+            ./x.py test cpp
+          printf 'cpp_tests_seconds\t%s\n' "$((SECONDS - started))" | tee -a build-times.tsv
 
-          for report in sequential concurrent go-hash; do
+      - name: Run Go hash package in a separate profile directory
+        working-directory: tests/gocase
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/profiles/go" workspace
+          profile_strip=$(awk -F/ '{print NF - 1}' <<< "${GITHUB_WORKSPACE}")
+          started=${SECONDS}
+          GCOV_PREFIX="${GITHUB_WORKSPACE}/profiles/go" \
+          GCOV_PREFIX_STRIP="${profile_strip}" \
+            go test -count=1 -timeout=600s ./unit/type/hash \
+              -binPath="${GITHUB_WORKSPACE}/build/kvrocks" \
+              -cliPath=redis-cli \
+              -workspace="${GITHUB_WORKSPACE}/tests/gocase/workspace" \
+              -parallel 2
+          printf 'go_hash_isolated_seconds\t%s\n' "$((SECONDS - started))" | tee -a "${GITHUB_WORKSPACE}/build-times.tsv"
+
+      - name: Generate and merge isolated coverage reports
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find profiles/cpp -name '*.gcda' -printf '%s\t%p\n' | sort > cpp-isolated-profiles.txt
+          find profiles/go -name '*.gcda' -printf '%s\t%p\n' | sort > go-isolated-profiles.txt
+
+          find build -name '*.gcda' -delete
+          cp -a profiles/cpp/build/. build/
+          gcovr --root . --filter '^src/' --json -o cpp-isolated.json
+
+          find build -name '*.gcda' -delete
+          cp -a profiles/go/build/. build/
+          gcovr --root . --filter '^src/' --json -o go-isolated.json
+
+          gcovr --add-tracefile cpp-isolated.json \
+            --add-tracefile go-isolated.json \
+            --sonarqube -o coverage-isolated.xml
+
+          for report in go-after-both-built cpp-isolated go-isolated; do
             jq -r --arg report "${report}" '
               .files[]
               | select(.file == "src/commands/cmd_hash.cc"
@@ -175,24 +173,23 @@ jobs:
             ' "${report}.json"
           done | tee coverage-comparison.tsv
 
-          cat sequential-libgcov-errors.txt
-          cat concurrent-libgcov-errors.txt
-          cat go-hash-libgcov-errors.txt
+          cat build-times.tsv
           cat coverage-comparison.tsv
 
       - name: Upload diagnostic evidence
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-multiprocess-diagnostic
+          name: coverage-single-build-isolation
           path: |
-            sequential.json
-            concurrent.json
-            go-hash.json
-            sequential-profiles.txt
-            concurrent-profiles.txt
-            go-hash-profiles.txt
-            sequential-libgcov-errors.txt
-            concurrent-libgcov-errors.txt
-            go-hash-libgcov-errors.txt
-            go-hash-server-stderr.txt
+            build-times.tsv
+            kvrocks-objs-before-unittest.sha256
+            kvrocks-objs-after-unittest.sha256
+            kvrocks-objs.diff
+            go-after-both-built.json
+            cpp-isolated.json
+            go-isolated.json
+            coverage-isolated.xml
+            go-after-both-built-profiles.txt
+            cpp-isolated-profiles.txt
+            go-isolated-profiles.txt
             coverage-comparison.tsv
