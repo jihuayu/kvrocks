@@ -32,7 +32,7 @@ env:
 
 jobs:
   diagnose:
-    name: Compare C++ and Go coverage profiles
+    name: Trace one instrumented kvrocks process
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -50,11 +50,6 @@ jobs:
         if: ${{ steps.cache-kvrocks-deps.outputs.cache-hit != 'true' }}
         run: ./x.py fetch-deps ${{ env.KVROCKS_DEPS_CACHE_DIR }}
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: tests/gocase/go.mod
-          cache: false
-
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
@@ -65,65 +60,78 @@ jobs:
           sudo apt-get install -y redis-tools
           pip install gcovr==5.0
 
-      - name: Build coverage binaries
+      - name: Build one coverage binary
         run: |
           ./x.py build --skip-build --compiler gcc -DCMAKE_CXX_FLAGS=--coverage --dep-dir ${{ env.KVROCKS_DEPS_CACHE_DIR }}
-          cmake --build build --parallel $(nproc) --target kvrocks unittest
+          cmake --build build --parallel $(nproc) --target kvrocks
+          grep -F -- '--coverage' build/compile_commands.json | grep -F 'src/commands/cmd_hash.cc' > cmd-hash-compile-command.txt
 
-      - name: Run C++ unit tests
-        run: ./x.py test cpp
-
-      - name: Capture C++ profile
+      - name: Exercise one server process
+        shell: bash
         run: |
-          gcovr --root . --filter '^src/' --json -o cpp.json
-          echo 'C++ profile: cmd_hash.cc'
-          gcovr --add-tracefile cpp.json --filter '^src/commands/cmd_hash\.cc$' --txt
+          set -euo pipefail
+          run_dir="${RUNNER_TEMP}/kvrocks-coverage-single"
+          mkdir -p "${run_dir}"
+          ./build/kvrocks             --bind 127.0.0.1             --port 56666             --dir "${run_dir}"             --log-dir stderr             > single-process.stdout 2> single-process.stderr &
+          kvrocks_pid=$!
 
-      - name: Run Go hash tests on top of C++ profile
-        working-directory: tests/gocase
+          stop_server() {
+            if kill -0 "${kvrocks_pid}" 2>/dev/null; then
+              kill -TERM "${kvrocks_pid}"
+              wait "${kvrocks_pid}"
+            fi
+          }
+          trap stop_server EXIT
+
+          ready=false
+          for _ in {1..120}; do
+            if redis-cli -h 127.0.0.1 -p 56666 ping >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 0.25
+          done
+          test "${ready}" = true
+
+          test "$(redis-cli -h 127.0.0.1 -p 56666 hset codex-coverage field value)" = 1
+          test "$(redis-cli -h 127.0.0.1 -p 56666 hget codex-coverage field)" = value
+          test "$(redis-cli -h 127.0.0.1 -p 56666 hlen codex-coverage)" = 1
+
+          kill -TERM "${kvrocks_pid}"
+          wait "${kvrocks_pid}"
+          trap - EXIT
+
+      - name: Inspect raw profiles
+        shell: bash
         run: |
-          mkdir -p workspace
-          go test -timeout=600s ./unit/type/hash \
-            -binPath="${GITHUB_WORKSPACE}/build/kvrocks" \
-            -cliPath=redis-cli \
-            -workspace="${GITHUB_WORKSPACE}/tests/gocase/workspace" \
-            -parallel 2
+          find build -name '*.gcda' -printf '%s\t%TY-%Tm-%TdT%TH:%TM:%TS\t%p\n' | sort > profile-inventory.txt
+          find build -name '*.gcda' | sort | grep -E 'cmd_hash|redis_hash|server\.cc|main\.cc' > relevant-profiles.txt || true
 
-      - name: Capture direct combined profile
-        run: |
-          gcovr --root . --filter '^src/' --json -o combined-direct.json
-          echo 'Direct C++ + Go profile: cmd_hash.cc'
-          gcovr --add-tracefile combined-direct.json --filter '^src/commands/cmd_hash\.cc$' --txt
+          gcovr --root . --filter '^src/' --json -o single-process.json
+          gcovr --add-tracefile single-process.json --filter '^src/commands/cmd_hash\\.cc$' --txt > cmd-hash-coverage.txt
+          gcovr --add-tracefile single-process.json --filter '^src/types/redis_hash\\.cc$' --txt > redis-hash-coverage.txt
+          gcovr --add-tracefile single-process.json --filter '^src/server/server\\.cc$' --txt > server-coverage.txt
+          gcovr --add-tracefile single-process.json --filter '^src/cli/main\\.cc$' --txt > main-coverage.txt
 
-      - name: Reset runtime counters
-        run: find build -name '*.gcda' -delete
+          cat relevant-profiles.txt
+          cat cmd-hash-coverage.txt
+          cat redis-hash-coverage.txt
+          cat server-coverage.txt
+          cat main-coverage.txt
+          cat single-process.stderr
 
-      - name: Run isolated Go hash tests
-        working-directory: tests/gocase
-        run: |
-          go test -count=1 -timeout=600s ./unit/type/hash \
-            -binPath="${GITHUB_WORKSPACE}/build/kvrocks" \
-            -cliPath=redis-cli \
-            -workspace="${GITHUB_WORKSPACE}/tests/gocase/workspace" \
-            -parallel 2
-
-      - name: Capture and merge isolated profiles
-        run: |
-          gcovr --root . --filter '^src/' --json -o go.json
-          echo 'Go-only profile: cmd_hash.cc'
-          gcovr --add-tracefile go.json --filter '^src/commands/cmd_hash\.cc$' --txt
-          gcovr --add-tracefile cpp.json --add-tracefile go.json --json -o merged.json
-          gcovr --add-tracefile merged.json --sonarqube -o merged.xml
-          echo 'Merged report: cmd_hash.cc'
-          gcovr --add-tracefile merged.json --filter '^src/commands/cmd_hash\.cc$' --txt
-
-      - name: Upload diagnostic reports
+      - name: Upload diagnostic evidence
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-profile-diagnostic
+          name: coverage-single-process-diagnostic
           path: |
-            cpp.json
-            combined-direct.json
-            go.json
-            merged.json
-            merged.xml
+            single-process.json
+            profile-inventory.txt
+            relevant-profiles.txt
+            cmd-hash-compile-command.txt
+            cmd-hash-coverage.txt
+            redis-hash-coverage.txt
+            server-coverage.txt
+            main-coverage.txt
+            single-process.stdout
+            single-process.stderr
