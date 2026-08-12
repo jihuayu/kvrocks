@@ -32,7 +32,7 @@ env:
 
 jobs:
   diagnose:
-    name: Trace one instrumented kvrocks process
+    name: Compare repeated process profile writes
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -50,6 +50,11 @@ jobs:
         if: ${{ steps.cache-kvrocks-deps.outputs.cache-hit != 'true' }}
         run: ./x.py fetch-deps ${{ env.KVROCKS_DEPS_CACHE_DIR }}
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tests/gocase/go.mod
+          cache: false
+
       - uses: actions/setup-python@v5
         with:
           python-version: 3.x
@@ -60,78 +65,134 @@ jobs:
           sudo apt-get install -y redis-tools
           pip install gcovr==5.0
 
-      - name: Build one coverage binary
+      - name: Build coverage binary
         run: |
           ./x.py build --skip-build --compiler gcc -DCMAKE_CXX_FLAGS=--coverage --dep-dir ${{ env.KVROCKS_DEPS_CACHE_DIR }}
           cmake --build build --parallel $(nproc) --target kvrocks
-          grep -F -- '--coverage' build/compile_commands.json | grep -F 'src/commands/cmd_hash.cc' > cmd-hash-compile-command.txt
 
-      - name: Exercise one server process
+      - name: Run repeated servers sequentially
         shell: bash
         run: |
           set -euo pipefail
-          run_dir="${RUNNER_TEMP}/kvrocks-coverage-single"
-          mkdir -p "${run_dir}"
-          ./build/kvrocks             --bind 127.0.0.1             --port 56666             --dir "${run_dir}"             --log-dir stderr             > single-process.stdout 2> single-process.stderr &
-          kvrocks_pid=$!
+          base_dir="${RUNNER_TEMP}/kvrocks-coverage-sequential"
+          mkdir -p "${base_dir}"
 
-          stop_server() {
-            if kill -0 "${kvrocks_pid}" 2>/dev/null; then
-              kill -TERM "${kvrocks_pid}"
-              wait "${kvrocks_pid}"
-            fi
-          }
-          trap stop_server EXIT
+          for instance in $(seq 1 61); do
+            run_dir="${base_dir}/${instance}"
+            mkdir -p "${run_dir}"
+            ./build/kvrocks               --bind 127.0.0.1               --port 56666               --dir "${run_dir}"               --log-dir stderr               > "${run_dir}/stdout" 2> "${run_dir}/stderr" &
+            kvrocks_pid=$!
 
-          ready=false
-          for _ in {1..120}; do
-            if redis-cli -h 127.0.0.1 -p 56666 ping >/dev/null 2>&1; then
-              ready=true
-              break
-            fi
-            sleep 0.25
+            ready=false
+            for _ in {1..120}; do
+              if redis-cli -h 127.0.0.1 -p 56666 ping >/dev/null 2>&1; then
+                ready=true
+                break
+              fi
+              sleep 0.1
+            done
+            test "${ready}" = true
+
+            test "$(redis-cli -h 127.0.0.1 -p 56666 hset codex-coverage field value)" = 1
+            test "$(redis-cli -h 127.0.0.1 -p 56666 hget codex-coverage field)" = value
+            kill -TERM "${kvrocks_pid}"
+            wait "${kvrocks_pid}"
           done
-          test "${ready}" = true
 
-          test "$(redis-cli -h 127.0.0.1 -p 56666 hset codex-coverage field value)" = 1
-          test "$(redis-cli -h 127.0.0.1 -p 56666 hget codex-coverage field)" = value
-          test "$(redis-cli -h 127.0.0.1 -p 56666 hlen codex-coverage)" = 1
+      - name: Capture sequential profile
+        run: |
+          gcovr --root . --filter '^src/' --json -o sequential.json
+          find build -name '*.gcda' -printf '%s\t%p\n' | sort > sequential-profiles.txt
+          find "${RUNNER_TEMP}/kvrocks-coverage-sequential" -name stderr -exec grep -H 'libgcov' {} + > sequential-libgcov-errors.txt || true
 
-          kill -TERM "${kvrocks_pid}"
-          wait "${kvrocks_pid}"
-          trap - EXIT
-
-      - name: Inspect raw profiles
+      - name: Run servers concurrently
         shell: bash
         run: |
-          find build -name '*.gcda' -printf '%s\t%TY-%Tm-%TdT%TH:%TM:%TS\t%p\n' | sort > profile-inventory.txt
-          find build -name '*.gcda' | sort | grep -E 'cmd_hash|redis_hash|server\.cc|main\.cc' > relevant-profiles.txt || true
+          set -euo pipefail
+          find build -name '*.gcda' -delete
+          base_dir="${RUNNER_TEMP}/kvrocks-coverage-concurrent"
+          mkdir -p "${base_dir}"
+          declare -a pids=()
 
-          gcovr --root . --filter '^src/' --json -o single-process.json
-          gcovr --add-tracefile single-process.json --filter '^src/commands/cmd_hash\\.cc$' --txt > cmd-hash-coverage.txt
-          gcovr --add-tracefile single-process.json --filter '^src/types/redis_hash\\.cc$' --txt > redis-hash-coverage.txt
-          gcovr --add-tracefile single-process.json --filter '^src/server/server\\.cc$' --txt > server-coverage.txt
-          gcovr --add-tracefile single-process.json --filter '^src/cli/main\\.cc$' --txt > main-coverage.txt
+          for instance in $(seq 1 16); do
+            port=$((57000 + instance))
+            run_dir="${base_dir}/${instance}"
+            mkdir -p "${run_dir}"
+            ./build/kvrocks               --bind 127.0.0.1               --port "${port}"               --dir "${run_dir}"               --log-dir stderr               > "${run_dir}/stdout" 2> "${run_dir}/stderr" &
+            pids+=("$!")
+          done
 
-          cat relevant-profiles.txt
-          cat cmd-hash-coverage.txt
-          cat redis-hash-coverage.txt
-          cat server-coverage.txt
-          cat main-coverage.txt
-          cat single-process.stderr
+          for instance in $(seq 1 16); do
+            port=$((57000 + instance))
+            ready=false
+            for _ in {1..120}; do
+              if redis-cli -h 127.0.0.1 -p "${port}" ping >/dev/null 2>&1; then
+                ready=true
+                break
+              fi
+              sleep 0.1
+            done
+            test "${ready}" = true
+            test "$(redis-cli -h 127.0.0.1 -p "${port}" hset codex-coverage field value)" = 1
+            test "$(redis-cli -h 127.0.0.1 -p "${port}" hget codex-coverage field)" = value
+          done
+
+          for pid in "${pids[@]}"; do kill -TERM "${pid}"; done
+          for pid in "${pids[@]}"; do wait "${pid}"; done
+
+      - name: Capture concurrent profile
+        run: |
+          gcovr --root . --filter '^src/' --json -o concurrent.json
+          find build -name '*.gcda' -printf '%s\t%p\n' | sort > concurrent-profiles.txt
+          find "${RUNNER_TEMP}/kvrocks-coverage-concurrent" -name stderr -exec grep -H 'libgcov' {} + > concurrent-libgcov-errors.txt || true
+
+      - name: Run isolated Go hash package
+        working-directory: tests/gocase
+        run: |
+          find "${GITHUB_WORKSPACE}/build" -name '*.gcda' -delete
+          mkdir -p workspace
+          go test -count=1 -timeout=600s ./unit/type/hash             -binPath="${GITHUB_WORKSPACE}/build/kvrocks"             -cliPath=redis-cli             -workspace="${GITHUB_WORKSPACE}/tests/gocase/workspace"             -parallel 2
+
+      - name: Capture Go package profile and errors
+        shell: bash
+        run: |
+          gcovr --root . --filter '^src/' --json -o go-hash.json
+          find build -name '*.gcda' -printf '%s\t%p\n' | sort > go-hash-profiles.txt
+          find tests/gocase/workspace -name stderr -exec grep -H 'libgcov' {} + > go-hash-libgcov-errors.txt || true
+          find tests/gocase/workspace -name stderr -exec sh -c 'for log_file do printf "===== %s\n" "${log_file}"; cat "${log_file}"; done' sh {} + > go-hash-server-stderr.txt
+
+          for report in sequential concurrent go-hash; do
+            jq -r --arg report "${report}" '
+              .files[]
+              | select(.file == "src/commands/cmd_hash.cc"
+                    or .file == "src/types/redis_hash.cc"
+                    or .file == "src/server/server.cc"
+                    or .file == "src/cli/main.cc")
+              | [$report, .file,
+                 ([.lines[] | select(."gcovr/noncode" | not)] | length),
+                 ([.lines[] | select((."gcovr/noncode" | not) and .count > 0)] | length)]
+              | @tsv
+            ' "${report}.json"
+          done | tee coverage-comparison.tsv
+
+          cat sequential-libgcov-errors.txt
+          cat concurrent-libgcov-errors.txt
+          cat go-hash-libgcov-errors.txt
+          cat coverage-comparison.tsv
 
       - name: Upload diagnostic evidence
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-single-process-diagnostic
+          name: coverage-multiprocess-diagnostic
           path: |
-            single-process.json
-            profile-inventory.txt
-            relevant-profiles.txt
-            cmd-hash-compile-command.txt
-            cmd-hash-coverage.txt
-            redis-hash-coverage.txt
-            server-coverage.txt
-            main-coverage.txt
-            single-process.stdout
-            single-process.stderr
+            sequential.json
+            concurrent.json
+            go-hash.json
+            sequential-profiles.txt
+            concurrent-profiles.txt
+            go-hash-profiles.txt
+            sequential-libgcov-errors.txt
+            concurrent-libgcov-errors.txt
+            go-hash-libgcov-errors.txt
+            go-hash-server-stderr.txt
+            coverage-comparison.tsv
