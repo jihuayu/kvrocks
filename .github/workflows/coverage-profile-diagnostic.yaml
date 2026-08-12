@@ -1,0 +1,129 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements. See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership. The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License. You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+name: Coverage Profile Diagnostic
+
+on:
+  push:
+    branches:
+      - codex/coverage-profile-diagnostic-20260812
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-profile-diagnostic
+  cancel-in-progress: true
+
+env:
+  KVROCKS_DEPS_CACHE_DIR: build-deps
+
+jobs:
+  diagnose:
+    name: Compare C++ and Go coverage profiles
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore Kvrocks dependency cache
+        id: cache-kvrocks-deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.KVROCKS_DEPS_CACHE_DIR }}
+          key: coverage-diagnostic-deps-${{ hashFiles('x.py', 'CMakeLists.txt', 'cmake/**/*.cmake') }}
+
+      - name: Fetch Kvrocks dependencies
+        if: ${{ steps.cache-kvrocks-deps.outputs.cache-hit != 'true' }}
+        run: ./x.py fetch-deps ${{ env.KVROCKS_DEPS_CACHE_DIR }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tests/gocase/go.mod
+          cache: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.x
+
+      - name: Install diagnostic tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-tools
+          pip install gcovr==5.0
+
+      - name: Build coverage binaries
+        run: |
+          ./x.py build --skip-build --compiler gcc -DCMAKE_CXX_FLAGS=--coverage --dep-dir ${{ env.KVROCKS_DEPS_CACHE_DIR }}
+          cmake --build build --parallel $(nproc) --target kvrocks unittest
+
+      - name: Run C++ unit tests
+        run: ./x.py test cpp
+
+      - name: Capture C++ profile
+        run: |
+          gcovr --root . --filter '^src/' --json -o cpp.json
+          echo 'C++ profile: cmd_hash.cc'
+          gcovr --add-tracefile cpp.json --filter '^src/commands/cmd_hash\.cc$' --txt
+
+      - name: Run Go hash tests on top of C++ profile
+        working-directory: tests/gocase
+        run: |
+          mkdir -p workspace
+          go test -timeout=600s ./unit/type/hash \
+            -binPath="${GITHUB_WORKSPACE}/build/kvrocks" \
+            -cliPath=redis-cli \
+            -workspace="${GITHUB_WORKSPACE}/tests/gocase/workspace" \
+            -parallel 2
+
+      - name: Capture direct combined profile
+        run: |
+          gcovr --root . --filter '^src/' --json -o combined-direct.json
+          echo 'Direct C++ + Go profile: cmd_hash.cc'
+          gcovr --add-tracefile combined-direct.json --filter '^src/commands/cmd_hash\.cc$' --txt
+
+      - name: Reset runtime counters
+        run: find build -name '*.gcda' -delete
+
+      - name: Run isolated Go hash tests
+        working-directory: tests/gocase
+        run: |
+          go test -count=1 -timeout=600s ./unit/type/hash \
+            -binPath="${GITHUB_WORKSPACE}/build/kvrocks" \
+            -cliPath=redis-cli \
+            -workspace="${GITHUB_WORKSPACE}/tests/gocase/workspace" \
+            -parallel 2
+
+      - name: Capture and merge isolated profiles
+        run: |
+          gcovr --root . --filter '^src/' --json -o go.json
+          echo 'Go-only profile: cmd_hash.cc'
+          gcovr --add-tracefile go.json --filter '^src/commands/cmd_hash\.cc$' --txt
+          gcovr --add-tracefile cpp.json --add-tracefile go.json --json -o merged.json
+          gcovr --add-tracefile merged.json --sonarqube -o merged.xml
+          echo 'Merged report: cmd_hash.cc'
+          gcovr --add-tracefile merged.json --filter '^src/commands/cmd_hash\.cc$' --txt
+
+      - name: Upload diagnostic reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-profile-diagnostic
+          path: |
+            cpp.json
+            combined-direct.json
+            go.json
+            merged.json
+            merged.xml
