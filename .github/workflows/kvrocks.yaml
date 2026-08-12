@@ -365,13 +365,13 @@ jobs:
       - name: Build Kvrocks (SonarCloud)
         if: ${{ matrix.sonarcloud }}
         run: |
-          build-wrapper-linux-x86-64 --out-dir ${{ env.SONARCLOUD_OUTPUT_DIR }} ./x.py build -j$NPROC --compiler ${{ matrix.compiler }} --skip-build --dep-dir ${{ env.KVROCKS_DEPS_CACHE_DIR }}
+          ./x.py build -j$NPROC --compiler ${{ matrix.compiler }} --skip-build --dep-dir ${{ env.KVROCKS_DEPS_CACHE_DIR }}
           cp -r build _build
           ./x.py build -j$NPROC --compiler ${{ matrix.compiler }} ${{ matrix.sonarcloud }} --skip-build --dep-dir ${{ env.KVROCKS_DEPS_CACHE_DIR }}
-          # Build and test unittest before building the integration binaries. Building
-          # either target can overwrite the shared kvrocks_objs coverage notes, which
-          # must match the binary that produces the coverage data.
-          cmake --build build --parallel $NPROC --target unittest
+          # Build unittest, kvrocks and kvrocks2redis in one dependency graph so
+          # they reuse kvrocks_objs and carry matching coverage timestamps.
+          build-wrapper-linux-x86-64 --out-dir ${{ env.SONARCLOUD_OUTPUT_DIR }} \
+            cmake --build build --parallel $NPROC
 
       - name: Build Kvrocks (RISC-V)
         if: ${{ matrix.riscv_toolchain }}
@@ -397,11 +397,6 @@ jobs:
           gcovr --json -o "${RUNNER_TEMP}/cpp-coverage.json"
           find build -name '*.gcda' -delete
 
-      - name: Build integration binaries (SonarCloud)
-        if: ${{ matrix.sonarcloud }}
-        run: |
-          build-wrapper-linux-x86-64 --out-dir ${{ env.SONARCLOUD_OUTPUT_DIR }} cmake --build build --parallel $NPROC --target kvrocks kvrocks2redis
-
       - name: Run Go Integration Cases
         run: |
           ulimit -c unlimited
@@ -426,8 +421,8 @@ jobs:
       - name: Collect Go integration coverage
         if: ${{ matrix.sonarcloud }}
         run: |
-          # Save the server coverage before kvrocks2redis exits. The two
-          # executables can carry different kvrocks_objs profile timestamps.
+          # Save the server coverage before running kvrocks2redis so each
+          # test phase is merged from an isolated counter set.
           gcovr --json -o "${RUNNER_TEMP}/go-coverage.json"
           find build -name '*.gcda' -delete
 
@@ -514,8 +509,7 @@ jobs:
       - name: Collect coverage into one XML report
         if: ${{ matrix.sonarcloud }}
         run: |
-          # Only collect utility sources here. kvrocks and kvrocks2redis share
-          # kvrocks_objs but may embed different coverage timestamps.
+          # Only collect utility sources from the isolated kvrocks2redis run.
           gcovr --filter 'utils/kvrocks2redis/' --json -o "${RUNNER_TEMP}/kvrocks2redis-coverage.json"
           gcovr --add-tracefile "${RUNNER_TEMP}/cpp-coverage.json" \
             --add-tracefile "${RUNNER_TEMP}/go-coverage.json" \
