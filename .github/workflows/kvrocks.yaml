@@ -423,6 +423,14 @@ jobs:
           fi
           ./x.py test go build -parallel 2 $GOCASE_RUN_ARGS ${{ matrix.ignore_when_tsan}} ${{ matrix.ignore_when_asan}} ${{ matrix.ignore_when_ubsan}}
 
+      - name: Collect Go integration coverage
+        if: ${{ matrix.sonarcloud }}
+        run: |
+          # Save the server coverage before kvrocks2redis exits. The two
+          # executables can carry different kvrocks_objs profile timestamps.
+          gcovr --json -o "${RUNNER_TEMP}/go-coverage.json"
+          find build -name '*.gcda' -delete
+
       - name: Install redis-py
         run: pip3 install redis==5.2.0
 
@@ -506,9 +514,12 @@ jobs:
       - name: Collect coverage into one XML report
         if: ${{ matrix.sonarcloud }}
         run: |
-          gcovr --json -o "${RUNNER_TEMP}/integration-coverage.json"
+          # Only collect utility sources here. kvrocks and kvrocks2redis share
+          # kvrocks_objs but may embed different coverage timestamps.
+          gcovr --filter 'utils/kvrocks2redis/' --json -o "${RUNNER_TEMP}/kvrocks2redis-coverage.json"
           gcovr --add-tracefile "${RUNNER_TEMP}/cpp-coverage.json" \
-            --add-tracefile "${RUNNER_TEMP}/integration-coverage.json" \
+            --add-tracefile "${RUNNER_TEMP}/go-coverage.json" \
+            --add-tracefile "${RUNNER_TEMP}/kvrocks2redis-coverage.json" \
             --sonarqube > ${{ env.SONARCLOUD_OUTPUT_DIR }}/coverage.xml
       
       - name: Add event information
