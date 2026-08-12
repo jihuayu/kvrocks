@@ -17,7 +17,11 @@
 
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches-ignore:
+      - codex/coverage-profile-diagnostic-20260812
+  pull_request:
 
 # Concurrency strategy:
 #   github.workflow: distinguish this workflow from others
