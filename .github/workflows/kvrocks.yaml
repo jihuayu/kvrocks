@@ -348,12 +348,12 @@ jobs:
           cache: false
           
       - name: Install gcovr 5.0
-        run: pip install gcovr==5.0 # 5.1 is not supported
         if: ${{ matrix.sonarcloud }}
+        run: pip install gcovr==5.0 # 5.1 is not supported
 
       - name: Install Build Wrapper
-        uses: SonarSource/sonarqube-scan-action/install-build-wrapper@713881670b6b3676cda39549040e2d88c70d582e # v8.2.0
         if: ${{ matrix.sonarcloud }}
+        uses: SonarSource/sonarqube-scan-action/install-build-wrapper@713881670b6b3676cda39549040e2d88c70d582e # v8.2.0
 
       - name: Build Kvrocks
         if: ${{ !matrix.sonarcloud && !matrix.riscv_toolchain }}
@@ -460,7 +460,7 @@ jobs:
           cleanup() {
             kill -TERM "$KVROCKS2REDIS_PID" 2>/dev/null || true
             wait "$KVROCKS2REDIS_PID" || true
-            $HOME/local/bin/redis-cli -p 6666 shutdown nosave || true
+            $HOME/local/bin/redis-cli -p 6666 shutdown || true
             $HOME/local/bin/redis-cli -p 6379 shutdown nosave || true
           }
           trap cleanup EXIT
@@ -477,6 +477,12 @@ jobs:
           python3 utils/kvrocks2redis/tests/populate-kvrocks.py --password="" --flushdb=true
           sleep 10s
           python3 utils/kvrocks2redis/tests/check_consistency.py --src_password=""
+
+      - name: Collect kvrocks2redis coverage
+        if: ${{ matrix.sonarcloud }}
+        run: |
+          gcovr --filter 'utils/kvrocks2redis/' --json -o "${RUNNER_TEMP}/kvrocks2redis-coverage.json"
+          find build -name '*.gcda' -delete
 
       - name: Find reports and crashes
         if: always()
@@ -506,11 +512,9 @@ jobs:
             ./build/kvrocks
             ./coredumps/*
       
-      - name: Collect coverage into one XML report
+      - name: Merge coverage reports
         if: ${{ matrix.sonarcloud }}
         run: |
-          # Only collect utility sources from the isolated kvrocks2redis run.
-          gcovr --filter 'utils/kvrocks2redis/' --json -o "${RUNNER_TEMP}/kvrocks2redis-coverage.json"
           gcovr --add-tracefile "${RUNNER_TEMP}/cpp-coverage.json" \
             --add-tracefile "${RUNNER_TEMP}/go-coverage.json" \
             --add-tracefile "${RUNNER_TEMP}/kvrocks2redis-coverage.json" \
