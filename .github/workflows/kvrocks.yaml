@@ -348,12 +348,12 @@ jobs:
           cache: false
           
       - name: Install gcovr 5.0
-        if: ${{ matrix.sonarcloud }}
         run: pip install gcovr==5.0 # 5.1 is not supported
+        if: ${{ matrix.sonarcloud }}
 
       - name: Install Build Wrapper
-        if: ${{ matrix.sonarcloud }}
         uses: SonarSource/sonarqube-scan-action/install-build-wrapper@713881670b6b3676cda39549040e2d88c70d582e # v8.2.0
+        if: ${{ matrix.sonarcloud }}
 
       - name: Build Kvrocks
         if: ${{ !matrix.sonarcloud && !matrix.riscv_toolchain }}
