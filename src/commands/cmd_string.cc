@@ -24,6 +24,7 @@
 
 #include "commander.h"
 #include "commands/command_parser.h"
+#include "common/string_util.h"
 #include "error_constants.h"
 #include "server/redis_reply.h"
 #include "server/redis_request.h"
@@ -383,8 +384,9 @@ class CommandSet : public Commander {
   Status Execute(engine::Context &ctx, Server *srv, Connection *conn, std::string *output) override {
     std::optional<std::string> ret;
     redis::String string_db(srv->storage, conn->GetNamespace());
+    const StringSetArgs set_args{expire_, set_flag_, get_, keep_ttl_, cmp_value_};
 
-    rocksdb::Status s = string_db.Set(ctx, args_[1], args_[2], {expire_, set_flag_, get_, keep_ttl_, cmp_value_}, ret);
+    rocksdb::Status s = string_db.Set(ctx, args_[1], args_[2], set_args, ret);
 
     if (!s.ok()) {
       return {Status::RedisExecErr, s.ToString()};

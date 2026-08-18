@@ -19,6 +19,7 @@
  */
 
 #include <cstdint>
+#include <string_view>
 
 #include "commander.h"
 #include "commands/ttl_util.h"

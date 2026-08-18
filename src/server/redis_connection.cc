@@ -23,6 +23,7 @@
 
 #include <mutex>
 #include <nonstd/span.hpp>
+#include <optional>
 #include <shared_mutex>
 
 #include "commands/commander.h"
@@ -46,6 +47,25 @@
 #include "worker.h"
 
 namespace redis {
+
+namespace {
+
+class KeyspaceEventContextGuard {
+ public:
+  KeyspaceEventContextGuard(engine::Context &ctx, KeyspaceEventJournal *journal) : ctx_(ctx) {
+    ctx_.keyspace_event_journal = journal;
+  }
+  ~KeyspaceEventContextGuard() { ctx_.keyspace_event_journal = nullptr; }
+
+ private:
+  engine::Context &ctx_;
+};
+
+int GetKeyspaceChannelFlags(const Config *config) {
+  return config->notify_keyspace_events & (kNotifyKeyspace | kNotifyKeyevent);
+}
+
+}  // namespace
 
 Connection::Connection(bufferevent *bev, Worker *owner)
     : need_free_bev_(true), bev_(bev), req_(owner->srv), owner_(owner), srv_(owner->srv) {
@@ -466,7 +486,26 @@ Status Connection::ExecuteCommand(engine::Context &ctx, const std::string &cmd_n
 
   auto start = std::chrono::high_resolution_clock::now();
   bool is_profiling = IsProfilingEnabled(cmd_name);
+
+  active_keyspace_event_journal_ =
+      std::make_unique<KeyspaceEventJournal>(GetNamespace(), srv_->GetConfig()->notify_keyspace_events);
+  KeyspaceEventContextGuard journal_guard(ctx, active_keyspace_event_journal_.get());
+  KeyspaceEventScope event_scope(active_keyspace_event_journal_.get());
+
   auto s = current_cmd->Execute(ctx, srv_, this, reply);
+
+  std::vector<KeyspaceEvent> events;
+  if (s.IsOK()) {
+    events = event_scope.Commit();
+  }
+  active_keyspace_event_journal_.reset();
+
+  if (!s.IsOK()) {
+    return s;
+  }
+
+  queueOrPublishKeyspaceEvents(std::move(events));
+
   auto end = std::chrono::high_resolution_clock::now();
   uint64_t duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
   if (is_profiling) RecordProfilingSampleIfNeed(cmd_name, duration);
@@ -709,10 +748,42 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
   }
 }
 
+void Connection::queueOrPublishKeyspaceEvents(std::vector<KeyspaceEvent> &&events) {
+  if (events.empty()) return;
+
+  if (in_exec_) {
+    // Queue transaction events until commit.
+    for (auto &event : events) {
+      pending_keyspace_events_.emplace_back(std::move(event));
+    }
+    return;
+  }
+
+  const int channel_flags = GetKeyspaceChannelFlags(srv_->GetConfig());
+  for (const auto &event : events) {
+    srv_->NotifyKeyspaceEvent(channel_flags, event.event, event.ns, event.key);
+  }
+}
+
+void Connection::FlushKeyspaceEvents() {
+  const int channel_flags = GetKeyspaceChannelFlags(srv_->GetConfig());
+  for (const auto &e : pending_keyspace_events_) {
+    srv_->NotifyKeyspaceEvent(channel_flags, e.event, e.ns, e.key);
+  }
+  pending_keyspace_events_.clear();
+}
+
 void Connection::ResetMultiExec() {
   in_exec_ = false;
   multi_error_ = false;
   multi_cmds_.clear();
+  // Drop events from failed or aborted transactions.
+  pending_keyspace_events_.clear();
+  // Retain capacity for typical transactions, but request releasing unusually large buffers.
+  constexpr std::size_t kMaxRetainedKeyspaceEvents = 1024;
+  if (pending_keyspace_events_.capacity() > kMaxRetainedKeyspaceEvents) {
+    pending_keyspace_events_.shrink_to_fit();
+  }
   DisableFlag(Connection::kMultiExec);
 }
 
