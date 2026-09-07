@@ -159,7 +159,8 @@ rocksdb::Status Database::Del(engine::Context &ctx, const Slice &user_key) {
   return storage_->Delete(ctx, storage_->DefaultWriteOptions(), metadata_cf_handle_, ns_key);
 }
 
-rocksdb::Status Database::MDel(engine::Context &ctx, const std::vector<Slice> &keys, uint64_t *deleted_cnt) {
+rocksdb::Status Database::MDel(engine::Context &ctx, const std::vector<Slice> &keys, uint64_t *deleted_cnt,
+                               bool publish_keyspace_event) {
   *deleted_cnt = 0;
 
   std::vector<std::string> ns_keys;
@@ -204,7 +205,9 @@ rocksdb::Status Database::MDel(engine::Context &ctx, const std::vector<Slice> &k
     s = batch->Delete(metadata_cf_handle_, ns_keys[i]);
     if (!s.ok()) return s;
     *deleted_cnt += 1;
-    ctx.AddKeyspaceEvent(kNotifyGeneric, "del", std::string_view(keys[i].data(), keys[i].size()));
+    if (publish_keyspace_event) {
+      ctx.AddKeyspaceEvent(kNotifyGeneric, "del", std::string_view(keys[i].data(), keys[i].size()));
+    }
   }
 
   if (*deleted_cnt == 0) return rocksdb::Status::OK();

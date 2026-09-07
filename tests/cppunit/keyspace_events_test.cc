@@ -99,7 +99,6 @@ TEST(KeyspaceEvents, ScopeRollsBackOnFailure) {
 TEST(KeyspaceEvents, ScopeCommitKeepsEvents) {
   KeyspaceEventJournal journal("tenant", kNotifyKeyspace | kNotifyString);
   journal.Add(kNotifyString, "set", "first");
-  const size_t mark = journal.Mark();
 
   std::vector<KeyspaceEvent> committed;
   {

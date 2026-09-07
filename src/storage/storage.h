@@ -432,7 +432,7 @@ struct Context {
     return keyspace_event_journal != nullptr && keyspace_event_journal->IsEnabled(type_flag);
   }
 
-  void AddKeyspaceEvent(int type_flag, std::string_view event, std::string_view key) {
+  void AddKeyspaceEvent(int type_flag, std::string_view event, std::string_view key) const {
     if (keyspace_event_journal != nullptr) {
       keyspace_event_journal->Add(type_flag, event, key);
     }

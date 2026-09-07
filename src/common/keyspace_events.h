@@ -42,6 +42,7 @@ bool ShouldNotifyKeyspaceEvent(int notify_flags, int type_flag);
 
 struct KeyspaceEvent {
   int type_flag;
+  int notify_flags;
   std::string event;
   std::string ns;
   std::string key;
@@ -51,14 +52,13 @@ struct KeyspaceEvent {
 // Connection owns publish timing and lifetime.
 class KeyspaceEventJournal {
  public:
-  KeyspaceEventJournal(std::string ns, int notify_flags)
-      : ns_(std::move(ns)), notify_flags_(notify_flags) {}
+  KeyspaceEventJournal(std::string ns, int notify_flags) : ns_(std::move(ns)), notify_flags_(notify_flags) {}
 
   bool IsEnabled(int type_flag) const { return ShouldNotifyKeyspaceEvent(notify_flags_, type_flag); }
 
   void Add(int type_flag, std::string_view event, std::string_view key) {
     if (!IsEnabled(type_flag)) return;
-    events_.emplace_back(KeyspaceEvent{type_flag, std::string(event), ns_, std::string(key)});
+    events_.emplace_back(KeyspaceEvent{type_flag, notify_flags_, std::string(event), ns_, std::string(key)});
   }
 
   size_t Mark() const { return events_.size(); }
@@ -84,7 +84,11 @@ class KeyspaceEventJournal {
 // Rolls back journal events on failure unless Commit() is called.
 class KeyspaceEventScope {
  public:
-  explicit KeyspaceEventScope(KeyspaceEventJournal *journal) : journal_(journal), mark_(journal ? journal->Mark() : 0) {}
+  explicit KeyspaceEventScope(KeyspaceEventJournal *journal)
+      : journal_(journal), mark_(journal ? journal->Mark() : 0) {}
+
+  KeyspaceEventScope(const KeyspaceEventScope &) = delete;
+  KeyspaceEventScope &operator=(const KeyspaceEventScope &) = delete;
 
   ~KeyspaceEventScope() {
     if (journal_ != nullptr && !committed_) {

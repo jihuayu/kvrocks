@@ -1597,9 +1597,9 @@ std::string Server::GetRocksDBStatsJson() const {
     rocksdb::HistogramData hist_data;
     stats->histogramData(iter.first, &hist_data);
     /* P50 P95 P99 P100 COUNT SUM */
-    stats_json[iter.second] =
-        jsoncons::json(jsoncons::json_array_arg, {hist_data.median, hist_data.percentile95, hist_data.percentile99,
-                                                  hist_data.max, hist_data.count, hist_data.sum});
+    stats_json.try_emplace(iter.second,
+                           jsoncons::json::make_array({hist_data.median, hist_data.percentile95, hist_data.percentile99,
+                                                       hist_data.max, hist_data.count, hist_data.sum}));
   }
 
   return stats_json.to_string();

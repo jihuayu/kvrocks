@@ -48,25 +48,6 @@
 
 namespace redis {
 
-namespace {
-
-class KeyspaceEventContextGuard {
- public:
-  KeyspaceEventContextGuard(engine::Context &ctx, KeyspaceEventJournal *journal) : ctx_(ctx) {
-    ctx_.keyspace_event_journal = journal;
-  }
-  ~KeyspaceEventContextGuard() { ctx_.keyspace_event_journal = nullptr; }
-
- private:
-  engine::Context &ctx_;
-};
-
-int GetKeyspaceChannelFlags(const Config *config) {
-  return config->notify_keyspace_events & (kNotifyKeyspace | kNotifyKeyevent);
-}
-
-}  // namespace
-
 Connection::Connection(bufferevent *bev, Worker *owner)
     : need_free_bev_(true), bev_(bev), req_(owner->srv), owner_(owner), srv_(owner->srv) {
   int64_t now = util::GetTimeStamp();
@@ -487,10 +468,11 @@ Status Connection::ExecuteCommand(engine::Context &ctx, const std::string &cmd_n
   auto start = std::chrono::high_resolution_clock::now();
   bool is_profiling = IsProfilingEnabled(cmd_name);
 
-  active_keyspace_event_journal_ =
-      std::make_unique<KeyspaceEventJournal>(GetNamespace(), srv_->GetConfig()->notify_keyspace_events);
-  KeyspaceEventContextGuard journal_guard(ctx, active_keyspace_event_journal_.get());
-  KeyspaceEventScope event_scope(active_keyspace_event_journal_.get());
+  KeyspaceEventJournal keyspace_event_journal(GetNamespace(), srv_->GetConfig()->notify_keyspace_events);
+  KeyspaceEventJournal *prev_journal = ctx.keyspace_event_journal;
+  ctx.keyspace_event_journal = &keyspace_event_journal;
+  auto journal_guard = MakeScopeExit([&] { ctx.keyspace_event_journal = prev_journal; });
+  KeyspaceEventScope event_scope(&keyspace_event_journal);
 
   auto s = current_cmd->Execute(ctx, srv_, this, reply);
 
@@ -498,7 +480,6 @@ Status Connection::ExecuteCommand(engine::Context &ctx, const std::string &cmd_n
   if (s.IsOK()) {
     events = event_scope.Commit();
   }
-  active_keyspace_event_journal_.reset();
 
   if (!s.IsOK()) {
     return s;
@@ -759,16 +740,14 @@ void Connection::queueOrPublishKeyspaceEvents(std::vector<KeyspaceEvent> &&event
     return;
   }
 
-  const int channel_flags = GetKeyspaceChannelFlags(srv_->GetConfig());
   for (const auto &event : events) {
-    srv_->NotifyKeyspaceEvent(channel_flags, event.event, event.ns, event.key);
+    srv_->NotifyKeyspaceEvent(event.notify_flags, event.event, event.ns, event.key);
   }
 }
 
 void Connection::FlushKeyspaceEvents() {
-  const int channel_flags = GetKeyspaceChannelFlags(srv_->GetConfig());
   for (const auto &e : pending_keyspace_events_) {
-    srv_->NotifyKeyspaceEvent(channel_flags, e.event, e.ns, e.key);
+    srv_->NotifyKeyspaceEvent(e.notify_flags, e.event, e.ns, e.key);
   }
   pending_keyspace_events_.clear();
 }
