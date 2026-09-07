@@ -41,6 +41,7 @@
 
 #include "commands/command_parser.h"
 #include "commands/commander.h"
+#include "common/keyspace_events.h"
 #include "common/string_util.h"
 #include "config/config.h"
 #include "fmt/format.h"
@@ -476,6 +477,17 @@ int Server::PublishMessage(const std::string &channel, const std::string &msg) {
   }
 
   return cnt;
+}
+
+void Server::NotifyKeyspaceEvent(int flags, const std::string &event, const std::string &ns, const std::string &key) {
+  const std::string db = MapNamespaceToKeyspaceDB(ns, GetConfig()->redis_databases);
+  // Publish keyspace before keyevent for each key.
+  if (flags & kNotifyKeyspace) {
+    PublishMessage("__keyspace@" + db + "__:" + key, event);
+  }
+  if (flags & kNotifyKeyevent) {
+    PublishMessage("__keyevent@" + db + "__:" + event, key);
+  }
 }
 
 void Server::SubscribeChannel(const std::string &channel, redis::Connection *conn) {
@@ -1585,9 +1597,9 @@ std::string Server::GetRocksDBStatsJson() const {
     rocksdb::HistogramData hist_data;
     stats->histogramData(iter.first, &hist_data);
     /* P50 P95 P99 P100 COUNT SUM */
-    stats_json[iter.second] =
-        jsoncons::json(jsoncons::json_array_arg, {hist_data.median, hist_data.percentile95, hist_data.percentile99,
-                                                  hist_data.max, hist_data.count, hist_data.sum});
+    stats_json.try_emplace(iter.second,
+                           jsoncons::json::make_array({hist_data.median, hist_data.percentile95, hist_data.percentile99,
+                                                       hist_data.max, hist_data.count, hist_data.sum}));
   }
 
   return stats_json.to_string();

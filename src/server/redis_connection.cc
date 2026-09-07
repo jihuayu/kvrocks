@@ -23,6 +23,7 @@
 
 #include <mutex>
 #include <nonstd/span.hpp>
+#include <optional>
 #include <shared_mutex>
 
 #include "commands/commander.h"
@@ -466,7 +467,26 @@ Status Connection::ExecuteCommand(engine::Context &ctx, const std::string &cmd_n
 
   auto start = std::chrono::high_resolution_clock::now();
   bool is_profiling = IsProfilingEnabled(cmd_name);
+
+  KeyspaceEventJournal keyspace_event_journal(GetNamespace(), srv_->GetConfig()->notify_keyspace_events);
+  KeyspaceEventJournal *prev_journal = ctx.keyspace_event_journal;
+  ctx.keyspace_event_journal = &keyspace_event_journal;
+  auto journal_guard = MakeScopeExit([&] { ctx.keyspace_event_journal = prev_journal; });
+  KeyspaceEventScope event_scope(&keyspace_event_journal);
+
   auto s = current_cmd->Execute(ctx, srv_, this, reply);
+
+  std::vector<KeyspaceEvent> events;
+  if (s.IsOK()) {
+    events = event_scope.Commit();
+  }
+
+  if (!s.IsOK()) {
+    return s;
+  }
+
+  queueOrPublishKeyspaceEvents(std::move(events));
+
   auto end = std::chrono::high_resolution_clock::now();
   uint64_t duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
   if (is_profiling) RecordProfilingSampleIfNeed(cmd_name, duration);
@@ -709,10 +729,40 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
   }
 }
 
+void Connection::queueOrPublishKeyspaceEvents(std::vector<KeyspaceEvent> &&events) {
+  if (events.empty()) return;
+
+  if (in_exec_) {
+    // Queue transaction events until commit.
+    for (auto &event : events) {
+      pending_keyspace_events_.emplace_back(std::move(event));
+    }
+    return;
+  }
+
+  for (const auto &event : events) {
+    srv_->NotifyKeyspaceEvent(event.notify_flags, event.event, event.ns, event.key);
+  }
+}
+
+void Connection::FlushKeyspaceEvents() {
+  for (const auto &e : pending_keyspace_events_) {
+    srv_->NotifyKeyspaceEvent(e.notify_flags, e.event, e.ns, e.key);
+  }
+  pending_keyspace_events_.clear();
+}
+
 void Connection::ResetMultiExec() {
   in_exec_ = false;
   multi_error_ = false;
   multi_cmds_.clear();
+  // Drop events from failed or aborted transactions.
+  pending_keyspace_events_.clear();
+  // Retain capacity for typical transactions, but request releasing unusually large buffers.
+  constexpr std::size_t kMaxRetainedKeyspaceEvents = 1024;
+  if (pending_keyspace_events_.capacity() > kMaxRetainedKeyspaceEvents) {
+    pending_keyspace_events_.shrink_to_fit();
+  }
   DisableFlag(Connection::kMultiExec);
 }
 

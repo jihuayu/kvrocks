@@ -35,9 +35,11 @@
 #include <memory>
 #include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "common/keyspace_events.h"
 #include "common/port.h"
 #include "config/config.h"
 #include "lock_manager.h"
@@ -424,6 +426,18 @@ class Storage {
 struct Context {
   engine::Storage *storage = nullptr;
 
+  KeyspaceEventJournal *keyspace_event_journal = nullptr;
+
+  bool IsKeyspaceEventEnabled(int type_flag) const {
+    return keyspace_event_journal != nullptr && keyspace_event_journal->IsEnabled(type_flag);
+  }
+
+  void AddKeyspaceEvent(int type_flag, std::string_view event, std::string_view key) const {
+    if (keyspace_event_journal != nullptr) {
+      keyspace_event_journal->Add(type_flag, event, key);
+    }
+  }
+
   /// batch can be nullptr if
   /// 1. The Context is not in transactional mode.
   /// 2. The Context is in transactional mode, but no write operation is performed.
@@ -468,16 +482,25 @@ struct Context {
   Context &operator=(Context &&ctx) noexcept {
     if (this != &ctx) {
       storage = ctx.storage;
+      keyspace_event_journal = ctx.keyspace_event_journal;
+      txn_context_enabled = ctx.txn_context_enabled;
       snapshot_ = ctx.snapshot_;
       batch = std::move(ctx.batch);
 
       ctx.storage = nullptr;
+      ctx.keyspace_event_journal = nullptr;
       ctx.snapshot_ = nullptr;
     }
     return *this;
   }
-  Context(Context &&ctx) noexcept : storage(ctx.storage), batch(std::move(ctx.batch)), snapshot_(ctx.snapshot_) {
+  Context(Context &&ctx) noexcept
+      : storage(ctx.storage),
+        keyspace_event_journal(ctx.keyspace_event_journal),
+        txn_context_enabled(ctx.txn_context_enabled),
+        batch(std::move(ctx.batch)),
+        snapshot_(ctx.snapshot_) {
     ctx.storage = nullptr;
+    ctx.keyspace_event_journal = nullptr;
     ctx.snapshot_ = nullptr;
   }
 

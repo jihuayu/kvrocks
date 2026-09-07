@@ -19,6 +19,7 @@
  */
 
 #include <cstdint>
+#include <string_view>
 
 #include "commander.h"
 #include "commands/ttl_util.h"
@@ -372,7 +373,7 @@ class CommandDel : public Commander {
     uint64_t cnt = 0;
     redis::Database redis(srv->storage, conn->GetNamespace());
 
-    auto s = redis.MDel(ctx, keys, &cnt);
+    auto s = redis.MDel(ctx, keys, &cnt, attributes_->name != "unlink");
     if (!s.ok()) return {Status::RedisExecErr, s.ToString()};
 
     *output = redis::Integer(cnt);

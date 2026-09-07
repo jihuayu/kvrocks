@@ -149,7 +149,7 @@ StatusOr<kqir::Value> FieldValueRetriever::Retrieve(engine::Context &ctx, std::s
     if (!s.IsOK()) return {Status::NotOK, s.Msg()};
     if (s->value.size() != 1)
       return {Status::NotFound, "json value specified by the field (json path) should exist and be unique"};
-    auto val = s->value[0];
+    const auto &val = s->value[0];
 
     return ParseFromJson(val, type);
   } else {
