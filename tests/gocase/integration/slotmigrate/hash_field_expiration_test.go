@@ -91,7 +91,8 @@ func TestSlotMigrateHashFieldExpiration(t *testing.T) {
 				"persistent": binaryValue, "live": "10", "persist": "20", "overwrite": "old", "deleted": "gone",
 			}
 			expires := []interface{}{int64(-1), expireAt, expireAt, expireAt, expireAt, int64(-2)}
-			var fieldExpireAt int64
+			// Verify migrated deadlines before testing expiration, independently of transfer speed.
+			fieldExpireAt := expireAt + 60000
 			expiringKey, expiringField, expiringValue := key, "live", "11"
 			if phase == "wal" {
 				// Keep the snapshot transfer running while subsequent hash changes enter the WAL.
@@ -116,8 +117,7 @@ func TestSlotMigrateHashFieldExpiration(t *testing.T) {
 				require.NoError(t, sourceClient.HSet(ctx, legacyKey, "field", binaryValue+"updated").Err())
 				require.NoError(t, sourceClient.Do(ctx, "hsetex", key+"_new", "PXAT", expireAt,
 					"FIELDS", 2, "field", "created-during-migration", "short-lived", "temporary").Err())
-				// The new key can only arrive through WAL; leave time for the rate-limited snapshot transfer.
-				fieldExpireAt = time.Now().Add(8 * time.Second).UnixMilli()
+				// The new key and its changed deadline can only arrive through WAL.
 				require.NoError(t, sourceClient.Do(ctx, "hpexpireat", key+"_new", fieldExpireAt, "FIELDS", 1, "short-lived").Err())
 				expiringKey, expiringField, expiringValue = key+"_new", "short-lived", "temporary"
 				values["live"] = "15"
@@ -125,7 +125,6 @@ func TestSlotMigrateHashFieldExpiration(t *testing.T) {
 				delete(values, "deleted")
 				expires = []interface{}{expireAt + 60000, expireAt, int64(-1), int64(-1), int64(-2), int64(-2)}
 			} else {
-				fieldExpireAt = time.Now().Add(3 * time.Second).UnixMilli()
 				require.NoError(t, sourceClient.Do(ctx, "hpexpireat", key, fieldExpireAt, "FIELDS", 1, "live").Err())
 				expires[1] = fieldExpireAt
 			}
@@ -187,6 +186,13 @@ func TestSlotMigrateHashFieldExpiration(t *testing.T) {
 			fieldExpires, err = destinationClient.Do(ctx, "hpexpiretime", expiringKey, "FIELDS", 1, expiringField).Result()
 			require.NoError(t, err)
 			require.Equal(t, []interface{}{fieldExpireAt}, fieldExpires)
+
+			// Start the short expiration window only after checking the transferred value and deadline.
+			fieldExpireAt = time.Now().Add(time.Second).UnixMilli()
+			fieldExpiryResult, err := destinationClient.Do(ctx, "hpexpireat", expiringKey, fieldExpireAt,
+				"FIELDS", 1, expiringField).Result()
+			require.NoError(t, err)
+			require.Equal(t, []interface{}{int64(1)}, fieldExpiryResult)
 			require.Eventually(t, func() bool {
 				return errors.Is(destinationClient.HGet(ctx, expiringKey, expiringField).Err(), redis.Nil)
 			}, 10*time.Second, 10*time.Millisecond)
