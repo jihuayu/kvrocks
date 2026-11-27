@@ -154,7 +154,8 @@ jobs:
           - name: SonarCloud with Coverage
             os: ubuntu-22.04
             compiler: gcc
-            sonarcloud: -DCMAKE_CXX_FLAGS=--coverage
+            with_ninja: --ninja
+            sonarcloud: -DENABLE_COVERAGE=ON
           - name: Ubuntu Clang
             os: ubuntu-22.04
             compiler: clang
@@ -243,6 +244,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       SONARCLOUD_OUTPUT_DIR: sonarcloud-data
+      KVROCKS2REDIS_TEST_DIR: kvrocks2redis-ci-data
+      GCOV_ERROR_PATTERN: 'libgcov profiling error|cannot merge|stamp mismatch|checksum mismatch'
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE20: true
       RISCV_PATH: "/opt/riscv"
     steps:
@@ -356,11 +359,11 @@ jobs:
       - name: Build Kvrocks (SonarCloud)
         if: ${{ matrix.sonarcloud }}
         run: |
-          build-wrapper-linux-x86-64 --out-dir ${{ env.SONARCLOUD_OUTPUT_DIR }} ./x.py build -j$NPROC --compiler ${{ matrix.compiler }} --skip-build --dep-dir ${{ env.KVROCKS_DEPS_CACHE_DIR }}
+          ./x.py build -j"$NPROC" --compiler ${{ matrix.compiler }} ${{ matrix.with_ninja }} ${{ matrix.sonarcloud }} \
+            --skip-build --dep-dir ${{ env.KVROCKS_DEPS_CACHE_DIR }}
           cp -r build _build
-          ./x.py build -j$NPROC --compiler ${{ matrix.compiler }} ${{ matrix.sonarcloud }} --skip-build --dep-dir ${{ env.KVROCKS_DEPS_CACHE_DIR }}
-          # x.py's default build targets include kvrocks2redis; keep it out of SonarCloud coverage.
-          build-wrapper-linux-x86-64 --out-dir ${{ env.SONARCLOUD_OUTPUT_DIR }} cmake --build build --parallel $NPROC --target kvrocks unittest
+          build-wrapper-linux-x86-64 --out-dir ${{ env.SONARCLOUD_OUTPUT_DIR }} \
+            cmake --build build --parallel "$NPROC" --target kvrocks kvrocks2redis unittest
 
       - name: Build Kvrocks (RISC-V)
         if: ${{ matrix.riscv_toolchain }}
@@ -405,29 +408,123 @@ jobs:
         run: pip3 install redis==5.2.0
 
       - name: Run kvrocks2redis Test
-        # Currently, when enabling Tsan/Asan or running in macOS 11/14, the value mismatch in destination redis server.
-        # It also stays out of the SonarCloud matrix so kvrocks2redis execution does not affect coverage.
-        # See https://github.com/apache/kvrocks/issues/2195.
-        if: ${{ !contains(matrix.name, 'Tsan') && !contains(matrix.name, 'Asan') && !startsWith(matrix.os, 'macos') && !matrix.sonarcloud }}
+        # Skip TSAN, ASAN, and macOS due to destination Redis value mismatches (#2195).
+        if: ${{ !contains(matrix.name, 'Tsan') && !contains(matrix.name, 'Asan') && !startsWith(matrix.os, 'macos') }}
         run: |
           ulimit -c unlimited
           export LSAN_OPTIONS="suppressions=$(realpath ./tests/lsan-suppressions)"
           export TSAN_OPTIONS="suppressions=$(realpath ./tests/tsan-suppressions)"
-          $HOME/local/bin/redis-server --daemonize yes
-          mkdir -p kvrocks2redis-ci-data
-          ./build/kvrocks --dir `pwd`/kvrocks2redis-ci-data --pidfile `pwd`/kvrocks.pid --daemonize yes
-          sleep 10s
-          echo -en "data-dir `pwd`/kvrocks2redis-ci-data\ndaemonize yes\noutput-dir ./\nnamespace.__namespace 127.0.0.1 6379\n" >> ./kvrocks2redis-ci.conf
-          cat ./kvrocks2redis-ci.conf
-          ./build/kvrocks2redis -c ./kvrocks2redis-ci.conf
-          sleep 10s
+          test_dir="$PWD/$KVROCKS2REDIS_TEST_DIR"
+          redis_cli="$HOME/local/bin/redis-cli"
+          mkdir -p "$test_dir/output"
+
+          cleanup() {
+            local status=$?
+            local pid
+            for pid in "${KVROCKS2REDIS_PID:-}" "${KVROCKS_PID:-}" "${REDIS_PID:-}"; do
+              [[ -n "$pid" ]] || continue
+              kill -KILL "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+            done
+            if (( status != 0 )); then
+              tail -n 60 "$test_dir"/*.log || true
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          wait_for_reply() {
+            local pid=$1 port=$2 expected=$3 deadline=$((SECONDS + 30))
+            shift 3
+            while (( SECONDS < deadline )); do
+              if ! kill -0 "$pid" 2>/dev/null; then
+                echo "Process $pid exited while waiting for Redis port $port to return '$expected' for $*"
+                return 1
+              fi
+              if [[ $(timeout 1s "$redis_cli" --raw -p "$port" "$@" 2>/dev/null) == "$expected" ]]; then
+                return 0
+              fi
+              sleep 0.1
+            done
+            echo "Timed out waiting for Redis port $port to return '$expected' for $*"
+            return 1
+          }
+
+          wait_for_exit() {
+            local pid=$1 name=$2 deadline=$((SECONDS + 30))
+            while kill -0 "$pid" 2>/dev/null; do
+              if (( SECONDS >= deadline )); then
+                echo "Timed out waiting for $name (PID $pid) to exit"
+                return 1
+              fi
+              sleep 0.1
+            done
+            local status=0
+            wait "$pid" || status=$?
+            if (( status != 0 )); then
+              echo "$name (PID $pid) exited with status $status"
+            fi
+            return "$status"
+          }
+
+          "$HOME/local/bin/redis-server" --daemonize no --save "" --dir "$test_dir" >"$test_dir/redis.log" 2>&1 &
+          REDIS_PID=$!
+          ./build/kvrocks --dir "$test_dir" --pidfile "$test_dir/kvrocks.pid" --daemonize no \
+            >"$test_dir/kvrocks.stdout.log" 2>"$test_dir/kvrocks.stderr.log" &
+          KVROCKS_PID=$!
+          wait_for_reply "$REDIS_PID" 6379 PONG PING
+          wait_for_reply "$KVROCKS_PID" 6666 PONG PING
+
+          cat >"$test_dir/kvrocks2redis.conf" <<EOF
+          data-dir $test_dir
+          daemonize no
+          output-dir $test_dir/output
+          namespace.__namespace 127.0.0.1 6379
+          EOF
+          ./build/kvrocks2redis -c "$test_dir/kvrocks2redis.conf" \
+            >"$test_dir/kvrocks2redis.stdout.log" 2>"$test_dir/kvrocks2redis.stderr.log" &
+          KVROCKS2REDIS_PID=$!
+          [[ $(timeout 5s "$redis_cli" --raw -p 6666 SET __kvrocks2redis_ready 1) == OK ]]
+          wait_for_reply "$KVROCKS2REDIS_PID" 6379 1 GET __kvrocks2redis_ready
+          [[ $(timeout 5s "$redis_cli" --raw -p 6666 DEL __kvrocks2redis_ready) == 1 ]]
+          wait_for_reply "$KVROCKS2REDIS_PID" 6379 0 EXISTS __kvrocks2redis_ready
+
           python3 utils/kvrocks2redis/tests/populate-kvrocks.py --password="" --flushdb=true
-          sleep 10s
+          [[ $(timeout 5s "$redis_cli" --raw -p 6666 SET __kvrocks2redis_sync_done 1) == OK ]]
+          wait_for_reply "$KVROCKS2REDIS_PID" 6379 1 GET __kvrocks2redis_sync_done
+          [[ $(timeout 5s "$redis_cli" --raw -p 6666 DEL __kvrocks2redis_sync_done) == 1 ]]
+          wait_for_reply "$KVROCKS2REDIS_PID" 6379 0 EXISTS __kvrocks2redis_sync_done
           python3 utils/kvrocks2redis/tests/check_consistency.py --src_password=""
+
+          # Wait for the instrumented processes to finish writing their coverage profiles.
+          kill -TERM "$KVROCKS2REDIS_PID"
+          wait_for_exit "$KVROCKS2REDIS_PID" kvrocks2redis
+          unset KVROCKS2REDIS_PID
+          timeout 30s "$redis_cli" -p 6666 shutdown
+          wait_for_exit "$KVROCKS_PID" kvrocks
+          unset KVROCKS_PID
+          timeout 5s "$redis_cli" -p 6379 shutdown nosave || true
+          if wait_for_exit "$REDIS_PID" redis-server; then unset REDIS_PID; fi
+
+          if [[ -n "${{ matrix.sonarcloud }}" ]] &&
+            grep -Ei "$GCOV_ERROR_PATTERN" "$test_dir/kvrocks.stderr.log" "$test_dir/kvrocks2redis.stderr.log"; then
+            echo "Found libgcov profiling errors in kvrocks2redis test logs"
+            exit 1
+          fi
 
       - name: Find reports and crashes
         if: always()
         run: |
+          if [[ -n "${{ matrix.sonarcloud }}" ]]; then
+            for log_dir in tests/gocase/workspace "$KVROCKS2REDIS_TEST_DIR"; do
+              if [[ -d "$log_dir" ]] &&
+                grep -rIEi --include=stderr --include=stdout --include='*.log' "$GCOV_ERROR_PATTERN" "$log_dir"; then
+                echo "Found libgcov profiling errors in $log_dir"
+                exit 1
+              fi
+            done
+          fi
+
           SANITIZER_OUTPUT=$(grep "Sanitizer:" tests/gocase/workspace -r || true)
           if [[ $SANITIZER_OUTPUT ]]; then
             echo "found sanitizer reports:"
@@ -456,7 +553,52 @@ jobs:
       - name: Collect coverage into one XML report
         if: ${{ matrix.sonarcloud }}
         run: |
-          gcovr --sonarqube > ${{ env.SONARCLOUD_OUTPUT_DIR }}/coverage.xml
+          gcovr --root . \
+            --filter '^src/' \
+            --filter '^utils/kvrocks2redis/' \
+            -j 1 \
+            --sonarqube -o "${{ env.SONARCLOUD_OUTPUT_DIR }}/coverage.xml" \
+            build
+          python3 - "${{ env.SONARCLOUD_OUTPUT_DIR }}/coverage.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          from collections import defaultdict
+          from pathlib import PurePosixPath
+
+          report = ET.parse(sys.argv[1]).getroot()
+          if report.tag != "coverage" or report.get("version") != "1":
+              sys.exit('Expected a <coverage version="1"> report')
+
+          directory_counts = defaultdict(lambda: [0, 0])
+          file_counts = {}
+          for file in report.findall("file"):
+              path = file.attrib["path"]
+              if path.startswith(("build/_deps/", "tests/")):
+                  sys.exit(f"Unexpected coverage path: {path}")
+              lines = file.findall("lineToCover")
+              covered = sum(line.attrib["covered"] == "true" for line in lines)
+              file_counts[path] = covered
+              directory = "/".join(PurePosixPath(path).parent.parts[:2]) + "/"
+              directory_counts[directory][0] += covered
+              directory_counts[directory][1] += len(lines)
+
+          print(f"{'Directory':28} {'Covered':>8} {'Total':>8}")
+          for directory, (covered, total) in sorted(directory_counts.items()):
+              print(f"{directory:28} {covered:8d} {total:8d}")
+
+          required_directories = (
+              "src/commands/", "src/server/", "src/cluster/", "src/storage/",
+              "src/types/", "utils/kvrocks2redis/",
+          )
+          required_files = (
+              "src/storage/storage.cc", "src/commands/cmd_server.cc", "src/search/ir_pass.h",
+              "utils/kvrocks2redis/main.cc",
+          )
+          missing = [directory for directory in required_directories if not directory_counts[directory][0]]
+          missing.extend(path for path in required_files if not file_counts.get(path))
+          if missing:
+              sys.exit("No covered lines in " + ", ".join(missing))
+          PY
       
       - name: Add event information
         if: ${{ matrix.sonarcloud }}
