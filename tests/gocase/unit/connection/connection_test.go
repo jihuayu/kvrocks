@@ -20,8 +20,11 @@
 package connection
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/apache/kvrocks/tests/gocase/util"
@@ -44,4 +47,22 @@ func TestConnection(t *testing.T) {
 		_, err = c.ReadLine()
 		require.Error(t, err)
 	})
+}
+
+func TestRestartPreservesStdout(t *testing.T) {
+	configs := map[string]string{}
+	srv := util.StartServer(t, configs)
+	defer srv.Close()
+
+	logPath := filepath.Join(configs["dir"], "stdout")
+	before, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, before)
+
+	srv.Restart()
+
+	after, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	require.True(t, bytes.HasPrefix(after, before), "stdout should retain the previous server's output")
+	require.Greater(t, len(after), len(before))
 }

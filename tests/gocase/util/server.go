@@ -165,10 +165,10 @@ func (s *KvrocksServer) Start() {
 
 	cmd.Args = append(cmd.Args, "-c", f.Name())
 
-	stdout, err := os.Create(filepath.Join(dir, "stdout"))
+	stdout, err := os.OpenFile(filepath.Join(dir, "stdout"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	require.NoError(s.t, err)
 	cmd.Stdout = stdout
-	stderr, err := os.Create(filepath.Join(dir, "stderr"))
+	stderr, err := os.OpenFile(filepath.Join(dir, "stderr"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	require.NoError(s.t, err)
 	cmd.Stderr = stderr
 
