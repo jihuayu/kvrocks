@@ -20,7 +20,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -40,10 +42,13 @@ class RedisWriter : public Writer {
   Status FlushDB(const std::string &ns) override;
 
   void Stop() override;
+  bool HasFailed() const override { return failed_; }
 
  private:
   std::thread t_;
-  bool stop_flag_ = false;
+  std::atomic<bool> stop_flag_{false};
+  std::atomic<bool> failed_{false};
+  std::mutex stop_mutex_;
   std::map<std::string, int> next_offset_fds_;
   std::map<std::string, std::istream::off_type> next_offsets_;
   std::map<std::string, int> redis_fds_;

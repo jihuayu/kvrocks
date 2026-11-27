@@ -39,11 +39,12 @@ void SendStringToEvent(bufferevent *bev, const std::string &data) {
   evbuffer_add(output, data.c_str(), data.length());
 }
 
-Sync::Sync(engine::Storage *storage, Writer *writer, Parser *parser, kvrocks2redis::Config *config)
-    : storage_(storage), writer_(writer), parser_(parser), config_(config) {}
+Sync::Sync(engine::Storage *storage, Writer *writer, Parser *parser, kvrocks2redis::Config *config,
+           bool (*shutdown_requested)())
+    : storage_(storage), writer_(writer), parser_(parser), config_(config), shutdown_requested_(shutdown_requested) {}
 
 Sync::~Sync() {
-  if (next_seq_fd_) close(next_seq_fd_);
+  if (next_seq_fd_ >= 0) close(next_seq_fd_);
   writer_->Stop();
 }
 
@@ -72,10 +73,7 @@ void Sync::Start() {
 }
 
 void Sync::Stop() {
-  if (stop_flag_) return;
-
-  stop_flag_ = true;  // Stopping procedure is asynchronous,
-  INFO("Sync Stopped");
+  if (!stop_flag_.exchange(true)) INFO("Sync Stopped");
 }
 
 Status Sync::tryCatchUpWithPrimary() {
@@ -119,7 +117,7 @@ Status Sync::incrementBatchLoop() {
     }
     if (next_seq_ <= storage_->LatestSeqNumber()) {
       storage_->GetDB()->GetUpdatesSince(next_seq_, &iter);
-      for (; iter->Valid(); iter->Next()) {
+      for (; !IsStopped() && iter->Valid(); iter->Next()) {
         auto batch = iter->GetBatch();
         if (batch.sequence != next_seq_) {
           if (next_seq_ > batch.sequence) {

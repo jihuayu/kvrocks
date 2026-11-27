@@ -23,6 +23,7 @@
 #include <event2/bufferevent.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <fstream>
 
 #include "cluster/replication.h"
@@ -35,7 +36,8 @@
 
 class Sync {
  public:
-  explicit Sync(engine::Storage *storage, Writer *writer, Parser *parser, kvrocks2redis::Config *config);
+  explicit Sync(engine::Storage *storage, Writer *writer, Parser *parser, kvrocks2redis::Config *config,
+                bool (*shutdown_requested)() = nullptr);
   ~Sync();
 
   Sync(const Sync &) = delete;
@@ -43,15 +45,18 @@ class Sync {
 
   void Start();
   void Stop();
-  bool IsStopped() const { return stop_flag_; }
+  bool IsStopped() const {
+    return stop_flag_ || (writer_ && writer_->HasFailed()) || (shutdown_requested_ && shutdown_requested_());
+  }
 
  private:
-  bool stop_flag_ = false;
+  std::atomic<bool> stop_flag_{false};
   engine::Storage *storage_ = nullptr;
   Writer *writer_ = nullptr;
   Parser *parser_ = nullptr;
   kvrocks2redis::Config *config_ = nullptr;
-  int next_seq_fd_;
+  bool (*shutdown_requested_)();
+  int next_seq_fd_ = -1;
   rocksdb::SequenceNumber next_seq_ = static_cast<rocksdb::SequenceNumber>(0);
 
   // Internal states managed by IncrementBatchLoop procedure

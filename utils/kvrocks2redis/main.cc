@@ -23,6 +23,7 @@
 #include <getopt.h>
 #include <sys/stat.h>
 
+#include <atomic>
 #include <csignal>
 #include <memory>
 
@@ -46,14 +47,22 @@
 
 const char *kDefaultConfPath = "./kvrocks2redis.conf";
 
-std::function<void()> hup_handler;
+static std::atomic<bool> shutdown_requested{false};
+static_assert(decltype(shutdown_requested)::is_always_lock_free);
 
 struct Options {
   std::string conf_file = kDefaultConfPath;
 };
 
-extern "C" void SignalHandler([[maybe_unused]] int sig) {
-  if (hup_handler) hup_handler();
+// Avoid inserting coverage counter updates into the signal handler.
+extern "C"
+#if defined(__has_cpp_attribute)
+#if __has_cpp_attribute(gnu::no_profile_instrument_function)
+    [[gnu::no_profile_instrument_function]]
+#endif
+#endif
+    void SignalHandler([[maybe_unused]] int sig) {
+  shutdown_requested.store(true, std::memory_order_relaxed);
 }
 
 static void Usage(const char *program) {
@@ -139,15 +148,14 @@ int main(int argc, char *argv[]) {
   RedisWriter writer(&config);
   Parser parser(&storage, &writer);
 
-  Sync sync(&storage, &writer, &parser, &config);
-  hup_handler = [&sync] {
-    if (!sync.IsStopped()) {
+  {
+    Sync sync(&storage, &writer, &parser, &config, [] { return shutdown_requested.load(std::memory_order_relaxed); });
+    sync.Start();
+    if (shutdown_requested.load(std::memory_order_relaxed)) {
       INFO("Stopping sync");
-      sync.Stop();
     }
-  };
-  sync.Start();
+  }
 
   RemovePidFile(config.pidfile);
-  return 0;
+  return writer.HasFailed() ? 1 : 0;
 }

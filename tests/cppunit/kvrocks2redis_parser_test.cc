@@ -18,11 +18,49 @@
  */
 
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <tuple>
 
 #include "kvrocks2redis/parser.h"
+#include "kvrocks2redis/redis_writer.h"
+#include "kvrocks2redis/sync.h"
 #include "server/redis_reply.h"
 #include "test_base.h"
+
+TEST(Kvrocks2RedisShutdownTest, ConcurrentStopIsIdempotent) {
+  kvrocks2redis::Config config;
+  RedisWriter writer(&config);
+  Sync sync(nullptr, &writer, nullptr, &config);
+  EXPECT_FALSE(sync.IsStopped());
+
+  auto stop = [&] {
+    sync.Stop();
+    writer.Stop();
+  };
+  std::thread stopper(stop);
+  stop();
+  stopper.join();
+
+  EXPECT_TRUE(sync.IsStopped());
+  EXPECT_FALSE(writer.HasFailed());
+}
+
+TEST(Kvrocks2RedisShutdownTest, OffsetReadFailureStopsSync) {
+  kvrocks2redis::Config config;
+  config.output_dir = "/dev/null/";
+  config.tokens.emplace("__namespace", kvrocks2redis::RedisServer{"127.0.0.1", 6379, "", 0});
+  RedisWriter writer(&config);
+  Sync sync(nullptr, &writer, nullptr, &config);
+
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!sync.IsStopped() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  EXPECT_TRUE(writer.HasFailed());
+  EXPECT_TRUE(sync.IsStopped());
+}
 
 class RecordingWriter : public Writer {
  public:

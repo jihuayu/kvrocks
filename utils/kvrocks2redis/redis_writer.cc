@@ -20,7 +20,6 @@
 
 #include "redis_writer.h"
 
-#include <assert.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -88,18 +87,18 @@ static StatusOr<std::string_view> ParseCommands(std::string_view data) {
 }
 
 RedisWriter::RedisWriter(kvrocks2redis::Config *config) : Writer(config) {
-  auto t = util::CreateThread("redis-writer", [this]() {
-    this->sync();
-    assert(stop_flag_);
-  });
+  auto t = util::CreateThread("redis-writer", [this] { sync(); });
   if (!t.IsOK()) {
     ERROR("Failed to create thread: {}", t.Msg());
+    failed_ = true;
+    stop_flag_ = true;
     return;
   }
   t_ = std::move(*t);
 }
 
 RedisWriter::~RedisWriter() {
+  Stop();
   for (const auto &iter : next_offset_fds_) {
     close(iter.second);
   }
@@ -135,13 +134,12 @@ Status RedisWriter::FlushDB(const std::string &ns) {
 }
 
 void RedisWriter::Stop() {
-  if (stop_flag_) return;
-
-  stop_flag_ = true;  // Stopping procedure is asynchronous,
-
-  if (t_.joinable()) t_.join();
-  // handled by sync func
-  INFO("RedisWriter Stopped");
+  stop_flag_ = true;
+  std::lock_guard lock(stop_mutex_);
+  if (t_.joinable() && t_.get_id() != std::this_thread::get_id()) {
+    t_.join();
+    INFO("RedisWriter Stopped");
+  }
 }
 
 void RedisWriter::sync() {
@@ -149,6 +147,8 @@ void RedisWriter::sync() {
     Status s = readNextOffsetFromFile(iter.first, &next_offsets_[iter.first]);
     if (!s.IsOK()) {
       ERROR("{}", s.Msg());
+      failed_ = true;
+      stop_flag_ = true;
       return;
     }
   }
@@ -169,7 +169,7 @@ void RedisWriter::sync() {
         continue;
       }
 
-      while (true) {
+      while (!stop_flag_) {
         auto read_len = pread(aof_fds_[iter.first], buffer.get(), chunk_size, next_offsets_[iter.first]);
         if (read_len <= 0) {
           if (read_len < 0) {
@@ -210,7 +210,8 @@ void RedisWriter::sync() {
           // Ooops, something went wrong , sync process has been terminated, administrator should be notified
           // when full sync is needed, please remove last_next_seq config file, and restart kvrocks2redis
           ERROR("CRITICAL - redis sync return error, administrator confirm needed: {}", line);
-          Stop();
+          failed_ = true;
+          stop_flag_ = true;
           return;
         }
 
