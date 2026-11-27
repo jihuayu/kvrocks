@@ -61,9 +61,10 @@ if (NOT lua_POPULATED)
     COMMAND ${MAKE_COMMAND} libluajit.a ${NINJA_MAKE_JOBS_FLAG}
       "CFLAGS=${LUA_CFLAGS}" ${MACOSX_TARGET}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${luajit_BINARY_DIR}/include
-    COMMAND sh -c "cp ${luajit_SOURCE_DIR}/src/*.h ${luajit_SOURCE_DIR}/src/*.hpp ${luajit_BINARY_DIR}/include/"
+    COMMAND sh -c "\"${CMAKE_COMMAND}\" -E copy_if_different ./*.h ./*.hpp \"${luajit_BINARY_DIR}/include/\""
     WORKING_DIRECTORY ${luajit_SOURCE_DIR}/src
     BYPRODUCTS ${luajit_SOURCE_DIR}/src/libluajit.a
+    VERBATIM
   )
 
   file(GLOB LUA_PUBLIC_HEADERS "${luajit_SOURCE_DIR}/src/*.hpp" "${luajit_SOURCE_DIR}/src/*.h")
