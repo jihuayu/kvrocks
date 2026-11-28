@@ -19,8 +19,12 @@ FROM ubuntu:24.04
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends autoconf automake build-essential ca-certificates \
-      clang-format-18 clang-tidy-18 cmake curl git gnupg libtool lsb-release ninja-build python3 \
-      python3-pip wget zstd \
+      cmake curl git gnupg libtool lsb-release ninja-build python3 python3-pip wget zstd \
+    && wget -q -O /etc/apt/keyrings/llvm.asc https://apt.llvm.org/llvm-snapshot.gpg.key \
+    && echo 'deb [signed-by=/etc/apt/keyrings/llvm.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-18 main' \
+      > /etc/apt/sources.list.d/llvm.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends clang-format-18 clang-tidy-18 \
     && rm -rf /var/lib/apt/lists/*
 
 ARG GO_VERSION
