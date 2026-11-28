@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/apache/kvrocks/tests/gocase/util"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -235,9 +236,13 @@ func TestWaitCommand(t *testing.T) {
 
 // When WAIT is executed, it should block future commands in the buffer until the number of replicas that have reached the target sequence is reached.
 func TestWaitBlockExecutingCommand(t *testing.T) {
+	ctx := context.Background()
+
 	// Start master server
 	masterSrv := util.StartServer(t, map[string]string{})
 	defer masterSrv.Close()
+	masterRdb := masterSrv.NewClient()
+	defer func() { require.NoError(t, masterRdb.Close()) }()
 
 	tcpClient := masterSrv.NewTCPClient()
 	defer func() { require.NoError(t, tcpClient.Close()) }()
@@ -246,23 +251,19 @@ func TestWaitBlockExecutingCommand(t *testing.T) {
 	require.NoError(t, tcpClient.WriteArgs("SET", "k1", "v1"))
 	require.NoError(t, tcpClient.WriteArgs("WAIT", "1", "0"))
 
-	// sleep for some time, so the commands are not read by a single read callback
-	// if the server does not block the command while waiting
-	time.Sleep(1 * time.Second)
+	waitForBlockedWaitClient(t, masterRdb)
 
 	// should be blocked after k1 is set to v1
 	require.NoError(t, tcpClient.WriteArgs("SET", "k1", "v2"))
 	require.NoError(t, tcpClient.WriteArgs("WAIT", "1", "0"))
 
+	// Give a server that still reads from the blocked connection time to process this batch.
 	time.Sleep(1 * time.Second)
 
 	require.NoError(t, tcpClient.WriteArgs("SET", "k1", "v3"))
 
-	masterRdb := masterSrv.NewClient()
-	defer func() { require.NoError(t, masterRdb.Close()) }()
-
 	// only the first command should be executed
-	require.Equal(t, "v1", masterRdb.Get(context.Background(), "k1").Val())
+	require.Equal(t, "v1", masterRdb.Get(ctx, "k1").Val())
 
 	// Start slave server
 	slaveSrv := util.StartServer(t, map[string]string{})
@@ -277,54 +278,64 @@ func TestWaitBlockExecutingCommand(t *testing.T) {
 
 	// the remaining command should be executed after replication
 	require.Eventually(t, func() bool {
-		return slaveRdb.Get(context.Background(), "k1").Val() == "v3"
-	}, 5*time.Second, 100*time.Millisecond)
+		return slaveRdb.Get(ctx, "k1").Val() == "v3"
+	}, 5*time.Second, 20*time.Millisecond)
 }
 
 // if a command is blocked by WAIT, it should continue to execute after the WAIT command is completed.
 func TestContinueExecutingCommandAfterWait(t *testing.T) {
 	// Start master server
 	masterSrv := util.StartServer(t, map[string]string{})
-	// defer masterSrv.Close()
+	defer masterSrv.Close()
 
 	// Start slave server
 	slaveSrv := util.StartServer(t, map[string]string{})
-	// defer slaveSrv.Close()
+	defer slaveSrv.Close()
 
 	masterRdb := masterSrv.NewClient()
 	defer func() { require.NoError(t, masterRdb.Close()) }()
+	masterConn := masterRdb.Conn()
+	defer func() { require.NoError(t, masterConn.Close()) }()
 
 	slaveRdb := slaveSrv.NewClient()
 	defer func() { require.NoError(t, slaveRdb.Close()) }()
 
 	ctx := context.Background()
 	// Set up initial value
-	require.NoError(t, masterRdb.Set(ctx, "k1", "v1", 0).Err())
+	require.NoError(t, masterConn.Set(ctx, "k1", "v1", 0).Err())
+	done := make(chan *redis.IntCmd, 1)
 	go func() {
-		time.Sleep(1 * time.Second)
-		util.SlaveOf(t, slaveRdb, masterSrv)
+		done <- masterConn.Wait(ctx, 1, 0)
 	}()
-	// this command should be blocked until the slave is connected
-	require.NoError(t, masterRdb.Wait(ctx, 1, 0).Err())
+	waitForBlockedWaitClient(t, masterRdb)
+	util.SlaveOf(t, slaveRdb, masterSrv)
+	select {
+	case result := <-done:
+		require.NoError(t, result.Err())
+		require.EqualValues(t, 1, result.Val())
+	case <-time.After(5 * time.Second):
+		t.Fatal("WAIT command did not complete after replica connected")
+	}
 
-	require.Equal(t, "v1", masterRdb.Get(ctx, "k1").Val())
+	require.Equal(t, "v1", masterConn.Get(ctx, "k1").Val())
 
 	// additional command should be executed
-	require.NoError(t, masterRdb.Set(ctx, "k1", "v2", 0).Err())
-	require.Equal(t, "v2", masterRdb.Get(ctx, "k1").Val())
+	require.NoError(t, masterConn.Set(ctx, "k1", "v2", 0).Err())
+	require.Equal(t, "v2", masterConn.Get(ctx, "k1").Val())
 
 	// Disconnect the slave
 	require.NoError(t, slaveRdb.Do(ctx, "SLAVEOF", "NO", "ONE").Err())
 
 	// set another value
-	require.NoError(t, masterRdb.Set(ctx, "k1", "v3", 0).Err())
-	// this command would time timeout
-	require.NoError(t, masterRdb.Wait(ctx, 1, 10*time.Millisecond).Err())
+	require.NoError(t, masterConn.Set(ctx, "k1", "v3", 0).Err())
+	result := masterConn.Wait(ctx, 1, 10*time.Millisecond)
+	require.NoError(t, result.Err())
+	require.Zero(t, result.Val())
 
-	require.Equal(t, "v3", masterRdb.Get(ctx, "k1").Val())
+	require.Equal(t, "v3", masterConn.Get(ctx, "k1").Val())
 
-	require.NoError(t, masterRdb.Set(ctx, "k1", "v4", 0).Err())
-	require.Equal(t, "v4", masterRdb.Get(ctx, "k1").Val())
+	require.NoError(t, masterConn.Set(ctx, "k1", "v4", 0).Err())
+	require.Equal(t, "v4", masterConn.Get(ctx, "k1").Val())
 
 	// reconnect the slave
 	util.SlaveOf(t, slaveRdb, masterSrv)
@@ -332,4 +343,11 @@ func TestContinueExecutingCommandAfterWait(t *testing.T) {
 
 	// slave should get the latest value
 	require.Equal(t, "v4", slaveRdb.Get(ctx, "k1").Val())
+}
+
+func waitForBlockedWaitClient(t *testing.T, rdb *redis.Client) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return util.FindInfoEntry(rdb, "blocked_clients", "clients") == "1"
+	}, 5*time.Second, 20*time.Millisecond)
 }

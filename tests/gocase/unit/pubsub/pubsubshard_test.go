@@ -22,7 +22,9 @@ package pubsub
 import (
 	"context"
 	"fmt"
+	"maps"
 	"testing"
+	"time"
 
 	"github.com/apache/kvrocks/tests/gocase/util"
 	"github.com/redis/go-redis/v9"
@@ -142,7 +144,8 @@ func TestPubSubShard(t *testing.T) {
 			receiveType(t, pubsub, &redis.Subscription{})
 
 			pubsub1 := c.SSubscribe(ctx, "multichannel1{tag1}")
-			defer pubsub1.Close()
+			defer func() { require.NoError(t, pubsub1.Close()) }()
+			receiveType(t, pubsub1, &redis.Subscription{})
 
 			sc := c.PubSubShardChannels(ctx, "")
 			require.EqualValues(t, len(sc.Val()), 4)
@@ -151,14 +154,23 @@ func TestPubSubShard(t *testing.T) {
 
 			sn := c.PubSubShardNumSub(ctx)
 			require.EqualValues(t, len(sn.Val()), 0)
-			sn = c.PubSubShardNumSub(ctx, "singlechannel", "multichannel1{tag1}", "multichannel2{tag1}", "multichannel3{tag1}")
-			for i, k := range sn.Val() {
-				if i == "multichannel1{tag1}" {
-					require.EqualValues(t, k, 2)
-				} else {
-					require.EqualValues(t, k, 1)
-				}
+			channels := []string{"singlechannel", "multichannel1{tag1}", "multichannel2{tag1}", "multichannel3{tag1}"}
+			want := map[string]int64{
+				"singlechannel":       1,
+				"multichannel1{tag1}": 2,
+				"multichannel2{tag1}": 1,
+				"multichannel3{tag1}": 1,
 			}
+			counts, err := c.PubSubShardNumSub(ctx, channels...).Result()
+			require.NoError(t, err)
+			require.Equal(t, want, counts)
+
+			require.NoError(t, pubsub1.SUnsubscribe(ctx, "multichannel1{tag1}"))
+			want["multichannel1{tag1}"] = 1
+			require.Eventually(t, func() bool {
+				counts, err := c.PubSubShardNumSub(ctx, channels...).Result()
+				return err == nil && maps.Equal(want, counts)
+			}, 5*time.Second, 20*time.Millisecond)
 		}
 	})
 }
