@@ -28,6 +28,6 @@ cd "$work_dir"
 wget -q -O "$archive" "https://download.redis.io/releases/$archive"
 echo "34e74856cbd66fdb3a684fb349d93961d8c7aa668b06f81fd93ff267d09bc277  $archive" | sha256sum -c -
 tar -xzf "$archive"
-make -C "redis-$version" -j"$(nproc)" USE_JEMALLOC=no redis-cli redis-server
+make -C "redis-$version/src" -j"$(nproc)" USE_JEMALLOC=no redis-cli redis-server
 install -d /usr/local/bin
 install -s "redis-$version/src/redis-cli" "redis-$version/src/redis-server" /usr/local/bin/
