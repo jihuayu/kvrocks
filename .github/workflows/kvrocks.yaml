@@ -50,6 +50,7 @@ jobs:
       has_container_matrix: ${{ steps.plan.outputs.has_container_matrix }}
       container_matrix: ${{ steps.plan.outputs.container_matrix }}
       run_docker: ${{ steps.plan.outputs.run_docker }}
+      ci_image_prefix: ${{ steps.images.outputs.prefix }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -61,6 +62,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 .github/scripts/ci_plan.py --changed-files-from-git
+      - name: Set CI image prefix
+        id: images
+        run: echo "prefix=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kvrocks-ci" >> "$GITHUB_OUTPUT"
 
   check-typos:
     name: Check typos and licenses
@@ -82,10 +86,20 @@ jobs:
     needs: [plan, check-typos]
     if: ${{ needs.plan.outputs.run_lint == 'true' }}
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.plan.outputs.ci_image_prefix }}/lint-ubuntu-24.04:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: Trust the checked-out repository
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Restore Kvrocks dependency cache
         id: cache-kvrocks-deps
         uses: actions/cache@v6
@@ -98,22 +112,11 @@ jobs:
         run: |
           ./x.py fetch-deps ${{ env.KVROCKS_DEPS_CACHE_DIR }}
           ./x.py fetch-deps ${{ env.KVROCKS_DEPS_CACHE_DIR }} -D ENABLE_LUAJIT=OFF
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: 'tests/gocase/go.mod'
-          cache: true
-          cache-dependency-path: 'tests/gocase/go.sum'
-      - name: Prepare Dependencies
-        run: |
-          wget --max-redirect=0 -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          echo "deb https://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-18 main" | sudo tee /etc/apt/sources.list.d/llvm.list
-          sudo apt update
-          sudo apt install -y clang-format-18 clang-tidy-18
       - name: Check with clang-format
         id: check-format
         run: ./x.py check format --clang-format-path clang-format-18
       - name: Check with clang-tidy
-        shell: python
+        shell: python3 {0}
         env:
           TIDY_MODE: ${{ needs.plan.outputs.tidy_mode }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -331,7 +334,7 @@ jobs:
           if [[ -n "${{ matrix.without_luajit }}" ]]; then
             GOCASE_RUN_ARGS="$GOCASE_RUN_ARGS -luaJITEnable=false"
           fi
-          ./x.py test go build -parallel ${{ matrix.go_parallel || 2 }} $GOCASE_RUN_ARGS ${{ matrix.go_tags }}
+          ./x.py test go build -count=1 -parallel ${{ matrix.go_parallel || 2 }} $GOCASE_RUN_ARGS ${{ matrix.go_tags }}
 
       - name: Install redis-py
         if: ${{ !matrix.skip_kvrocks2redis }}
@@ -431,9 +434,14 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.plan.outputs.container_matrix) }}
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: read
     container:
-      image: ${{ matrix.image }}
-      options: ${{ matrix.container_options }}
+      image: ${{ needs.plan.outputs.ci_image_prefix }}/${{ matrix.ci_image_name }}:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /usr/local/lib/android:/usr-local-lib-android
         - /usr/share/dotnet:/usr-share-dotnet
@@ -443,93 +451,11 @@ jobs:
           df -h
           rm -rf /usr-local-lib-android/* /usr-share-dotnet/*
           df -h
-      - name: Setup ArchLinux
-        if: ${{ startsWith(matrix.image, 'archlinux') }}
-        run: |
-          pacman -Syu --noconfirm
-          pacman -Sy --noconfirm autoconf automake python3 python-redis git wget which cmake make gcc
-          echo "NPROC=$(nproc)" >> $GITHUB_ENV
-
-          # FIXME: Workaround for gcc 15 issue for rocksdb https://github.com/apache/kvrocks/issues/2927
-          echo "CXXFLAGS=$CXXFLAGS -include cstdint" >> $GITHUB_ENV
-
-      - name: Setup openSUSE
-        if: ${{ startsWith(matrix.image, 'opensuse') }}
-        run: |
-          zypper install -y gcc11 gcc11-c++ make wget git autoconf automake python3 python3-pip curl tar gzip cmake go which
-          update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-11 100
-          update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-11 100
-          update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100
-          update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100
-          echo "NPROC=$(nproc)" >> $GITHUB_ENV
-
-      - name: Setup Rocky Linux 8
-        if: ${{ startsWith(matrix.image, 'rockylinux:8') }}
-        run: |
-          dnf install -y epel-release
-          dnf config-manager --set-enabled powertools
-          dnf install -y git gcc-toolset-12 autoconf automake libtool python3 python3-pip openssl-devel which cmake
-          source /opt/rh/gcc-toolset-12/enable
-          update-alternatives --install /usr/bin/gcc gcc /opt/rh/gcc-toolset-12/root/usr/bin/gcc 100
-          update-alternatives --install /usr/bin/g++ g++ /opt/rh/gcc-toolset-12/root/usr/bin/g++ 100
-          update-alternatives --install /usr/bin/cc cc /opt/rh/gcc-toolset-12/root/usr/bin/gcc 100
-          update-alternatives --install /usr/bin/c++ c++ /opt/rh/gcc-toolset-12/root/usr/bin/g++ 100
-          echo "NPROC=$(nproc)" >> $GITHUB_ENV
-
-      - name: Setup Rocky Linux 9
-        if: ${{ startsWith(matrix.image, 'rockylinux:9') }}
-        run: |
-          dnf install -y epel-release
-          dnf config-manager --set-enabled crb
-          dnf install -y git gcc-toolset-12 autoconf automake libtool python3 python3-pip openssl-devel which cmake
-          source /opt/rh/gcc-toolset-12/enable
-          update-alternatives --install /usr/bin/gcc gcc /opt/rh/gcc-toolset-12/root/usr/bin/gcc 100
-          update-alternatives --install /usr/bin/g++ g++ /opt/rh/gcc-toolset-12/root/usr/bin/g++ 100
-          update-alternatives --install /usr/bin/cc cc /opt/rh/gcc-toolset-12/root/usr/bin/gcc 100
-          update-alternatives --install /usr/bin/c++ c++ /opt/rh/gcc-toolset-12/root/usr/bin/g++ 100
-          echo "NPROC=$(nproc)" >> $GITHUB_ENV
-
-      - name: Setup Debian 12
-        if: ${{ startsWith(matrix.image, 'debian') }}
-        run: |
-          apt update
-          apt install -y bash build-essential cmake curl git libssl-dev libtool python3 python3-pip wget
-          echo "NPROC=$(nproc)" >> $GITHUB_ENV
-
-      - name: Setup Alpine
-        if: ${{ startsWith(matrix.image, 'alpine') }}
-        run: |
-          apk update
-          apk add bash cmake curl git python3 wget make gcc g++ autoconf linux-headers py3-pip py3-redis tar zstd
-          echo "NPROC=$(nproc)" >> $GITHUB_ENV
-
-      - name: Cache redis
-        id: cache-redis
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/local/bin/redis-cli
-          key: ${{ matrix.image }}-redis-cli
-
-      - name: Cache redis server
-        id: cache-redis-server
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/local/bin/redis-server
-          key: ${{ matrix.image }}-redis-server
-
-      - name: Install redis
-        if: ${{ steps.cache-redis.outputs.cache-hit != 'true' || steps.cache-redis-server.outputs.cache-hit != 'true' }}
-        shell: bash
-        run: |
-          curl -O https://download.redis.io/releases/redis-6.2.14.tar.gz
-          tar -xzvf redis-6.2.14.tar.gz
-          mkdir -p $HOME/local/bin
-          pushd redis-6.2.14 && USE_JEMALLOC=no make -j$NPROC redis-cli && mv src/redis-cli $HOME/local/bin/ && popd
-          pushd redis-6.2.14 && USE_JEMALLOC=no make -j$NPROC redis-server && mv src/redis-server $HOME/local/bin/ && popd
-
       - uses: actions/checkout@v7
+      - name: Configure the build environment
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "NPROC=$(nproc)" >> "$GITHUB_ENV"
       - name: Restore Kvrocks dependency cache
         id: cache-kvrocks-deps
         uses: actions/cache/restore@v6
@@ -544,7 +470,7 @@ jobs:
           ./x.py fetch-deps ${{ env.KVROCKS_DEPS_CACHE_DIR }}
 
       - uses: actions/setup-go@v7
-        if: ${{ !startsWith(matrix.image, 'opensuse') }}
+        if: ${{ matrix.ci_image_name != 'opensuse-15' }}
         with:
           go-version-file: 'tests/gocase/go.mod'
           cache: false
@@ -561,21 +487,14 @@ jobs:
 
       - name: Run Go Integration Cases
         run: |
-          export PATH=$PATH:$HOME/local/bin/
           ./x.py test go build -parallel 4
-
-      - name: Install redis-py for openSUSE and Rocky
-        if: ${{ !startsWith(matrix.image, 'archlinux') && !startsWith(matrix.image, 'debian') && !startsWith(matrix.image, 'alpine') }}
-        run: pip3 install redis==4.3.6
-
-      - name: Install redis-py for Debian
-        if: ${{ startsWith(matrix.image, 'debian') }}
-        run: apt install -y python3-redis
 
       - name: Run kvrocks2redis Test
         # FIXME: https://github.com/apache/kvrocks/issues/2574
-        if: ${{ !startsWith(matrix.image, 'archlinux') }}
+        if: ${{ matrix.ci_image_name != 'archlinux' }}
         shell: bash
+        env:
+          REDIS_BIN_DIR: /usr/local/bin
         run: |
           bash .github/scripts/test_kvrocks2redis.sh
 

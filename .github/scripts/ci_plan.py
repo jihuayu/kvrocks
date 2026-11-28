@@ -56,12 +56,13 @@ BUILD_INFRA_EXACT = {
     ".dockerignore",
     ".github/scripts/ci_plan.py",
     ".github/scripts/test_ci_plan.py",
+    ".github/workflows/ci-images.yaml",
     ".github/workflows/kvrocks.yaml",
     "CMakeLists.txt",
     "Dockerfile",
     "x.py",
 }
-BUILD_INFRA_PREFIXES = ("cmake/",)
+BUILD_INFRA_PREFIXES = (".github/docker/", "cmake/")
 
 CMAKE_PREFIXES = ("cmake/",)
 CMAKE_EXACT = {"CMakeLists.txt", "x.py"}
@@ -129,18 +130,16 @@ def _job(
 
 def _container_job(
     name: str,
-    image: str,
+    ci_image_name: str,
     compiler: str = "gcc",
     *,
     disable_jemalloc: str = "",
-    container_options: str = "",
 ) -> Dict[str, Any]:
     return {
         "name": name,
-        "image": image,
+        "ci_image_name": ci_image_name,
         "compiler": compiler,
         "disable_jemalloc": disable_jemalloc,
-        "container_options": container_options,
         "use_ccache": False,
     }
 
@@ -343,20 +342,12 @@ def tier2_build_matrix() -> List[Dict[str, Any]]:
 
 def tier2_container_matrix() -> List[Dict[str, Any]]:
     return [
-        _container_job("openSUSE Leap 15", "opensuse/leap:15"),
-        _container_job("ArchLinux", "archlinux:base"),
-        _container_job("Rocky Linux 8", "rockylinux:8"),
-        _container_job(
-            "Rocky Linux 9",
-            "rockylinux:9",
-            container_options="--env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        ),
-        _container_job("Debian 12", "debian:12"),
-        _container_job(
-            "Alpine 3",
-            "alpine:3.22",
-            disable_jemalloc="-DDISABLE_JEMALLOC=ON",
-        ),
+        _container_job("openSUSE Leap 15", "opensuse-15"),
+        _container_job("ArchLinux", "archlinux"),
+        _container_job("Rocky Linux 8", "rocky-8"),
+        _container_job("Rocky Linux 9", "rocky-9"),
+        _container_job("Debian 12", "debian-12"),
+        *alpine_smoke_container_matrix(),
     ]
 
 
@@ -364,7 +355,7 @@ def alpine_smoke_container_matrix() -> List[Dict[str, Any]]:
     return [
         _container_job(
             "Alpine 3",
-            "alpine:3.22",
+            "alpine-3.22",
             disable_jemalloc="-DDISABLE_JEMALLOC=ON",
         )
     ]
