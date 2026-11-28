@@ -43,74 +43,76 @@ concurrency:
 
 env:
   KVROCKS_DEPS_CACHE_DIR: build-deps
-  RISCV_PATH: "/opt/riscv"
 
 jobs:
   validate-reporter:
     name: Validate Nightly Reporter
     if: github.event_name != 'schedule' || github.repository == 'apache/kvrocks'
     runs-on: ubuntu-24.04
+    outputs:
+      ci_image_prefix: ${{ steps.images.outputs.prefix }}
     steps:
+      - name: Set CI image prefix
+        id: images
+        run: echo "prefix=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kvrocks-ci" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
       - name: Run nightly reporter unit tests
         run: python3 -m unittest discover -v -s .github/scripts -p "test_nightly_report.py"
 
   riscv-qemu:
     name: Ubuntu RISC-V GCC without luaJIT (QEMU)
+    needs: validate-reporter
     if: >-
       (github.event_name == 'schedule' && github.repository == 'apache/kvrocks')
       || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    env:
-      RISCV_TOOLCHAIN_URL: "https://github.com/riscv-collab/riscv-gnu-toolchain/releases/download/2025.07.03/riscv64-glibc-ubuntu-24.04-gcc-nightly-2025.07.03-nightly.tar.xz"
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.validate-reporter.outputs.ci_image_prefix }}/riscv-ubuntu-24.04:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      # Register the emulator with the runner kernel and configure core dumps.
+      options: --privileged
+      volumes:
+        - /usr/local/lib/android:/usr-local-lib-android
+        - /usr/share/dotnet:/usr-share-dotnet
+        - /opt/ghc:/opt-ghc
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Maximize build space
         run: |
-          sudo df -h
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo df -h
+          df -h
+          rm -rf /usr-local-lib-android/* /usr-share-dotnet/* /opt-ghc/*
+          df -h
 
-      - name: Setup RISC-V Toolchain
+      - name: Enable RISC-V execution with QEMU
         run: |
-          sudo apt update
-          sudo apt install -y wget build-essential cmake ninja-build git python3 python3-pip \
-            autoconf automake libtool libgflags-dev libsnappy-dev zlib1g-dev liblz4-dev libzstd-dev \
-            qemu-user qemu-user-static
-          echo "NPROC=$(nproc)" >> $GITHUB_ENV
-          sudo mkdir -p $RISCV_PATH
-          wget "${RISCV_TOOLCHAIN_URL}" -O riscv-toolchain.tar.xz
-          sudo tar -xJf riscv-toolchain.tar.xz -C $RISCV_PATH --strip-components=1
-          rm riscv-toolchain.tar.xz
-          sudo sed -i "s|libdir='/mnt/riscv/riscv64-unknown-linux-gnu/lib'|libdir='$RISCV_PATH/riscv64-unknown-linux-gnu/lib'|g" \
-            $RISCV_PATH/riscv64-unknown-linux-gnu/lib/libatomic.la
-          echo "PATH=$RISCV_PATH/bin:$PATH" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=/opt/riscv/lib:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
-          echo "QEMU_LD_PREFIX=$RISCV_PATH/sysroot" >> $GITHUB_ENV
-
-      - name: Cache redis
-        id: cache-redis
-        uses: actions/cache@v6
-        with:
-          path: ~/local/bin/redis-cli
-          key: ubuntu-24.04-redis-cli
-      - name: Cache redis server
-        id: cache-redis-server
-        uses: actions/cache@v6
-        with:
-          path: ~/local/bin/redis-server
-          key: ubuntu-24.04-redis-server
-      - name: Install redis
-        if: ${{ steps.cache-redis.outputs.cache-hit != 'true' || steps.cache-redis-server.outputs.cache-hit != 'true' }}
-        run: |
-          curl -O https://download.redis.io/releases/redis-6.2.14.tar.gz
-          tar -xzf redis-6.2.14.tar.gz
-          mkdir -p $HOME/local/bin
-          pushd redis-6.2.14 && BUILD_TLS=yes make -j$NPROC redis-cli && mv src/redis-cli $HOME/local/bin/ && popd
-          pushd redis-6.2.14 && BUILD_TLS=yes make -j$NPROC redis-server && mv src/redis-server $HOME/local/bin/ && popd
+          binfmt_dir=/proc/sys/fs/binfmt_misc
+          if [[ ! -e "$binfmt_dir/register" ]]; then
+            mount -t binfmt_misc binfmt_misc "$binfmt_dir"
+          fi
+          if [[ ! -e "$binfmt_dir/qemu-riscv64" ]]; then
+            registration=$(grep -m1 '^:qemu-riscv64:' /usr/lib/binfmt.d/qemu-riscv64.conf)
+            printf '%s' "$registration" > "$binfmt_dir/register"
+          fi
+          probe_dir=$(mktemp -d)
+          trap 'rm -rf "$probe_dir"' EXIT
+          printf 'int main(void) { return 0; }\n' |
+            riscv64-unknown-linux-gnu-gcc -march=rv64gc -x c - -o "$probe_dir/probe"
+          "$probe_dir/probe"
 
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: Configure the build environment
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "NPROC=$(nproc)" >> "$GITHUB_ENV"
       - name: Restore Kvrocks dependency cache
         id: cache-kvrocks-deps
         uses: actions/cache/restore@v6
@@ -123,9 +125,6 @@ jobs:
         run: |
           ./x.py fetch-deps ${{ env.KVROCKS_DEPS_CACHE_DIR }} -D ENABLE_LUAJIT=OFF
 
-      - uses: actions/setup-python@v7
-        with:
-          python-version: 3.x
       - uses: actions/setup-go@v7
         with:
           go-version-file: 'tests/gocase/go.mod'
@@ -137,7 +136,7 @@ jobs:
 
       - name: Setup Coredump
         run: |
-          echo "$(pwd)/coredumps/corefile-%e-%p-%t" | sudo tee /proc/sys/kernel/core_pattern
+          echo "$(pwd)/coredumps/corefile-%e-%p-%t" | tee /proc/sys/kernel/core_pattern
           mkdir coredumps
 
       - name: Run Unit Test
@@ -148,13 +147,12 @@ jobs:
       - name: Run Go Integration Cases
         run: |
           ulimit -c unlimited
-          export PATH=$PATH:$HOME/local/bin/
           ./x.py test go build -parallel 2 -luaJITEnable=false
 
       - name: Run kvrocks2redis Test
         run: |
           ulimit -c unlimited
-          redis_cli="$HOME/local/bin/redis-cli"
+          redis_cli=/usr/local/bin/redis-cli
 
           redis_matches() {
             local port=$1 expected=$2 actual
@@ -184,8 +182,7 @@ jobs:
               redis_matches 6379 0 exists zfoo
           }
 
-          pip3 install redis==5.2.0
-          "$HOME/local/bin/redis-server" --daemonize yes
+          /usr/local/bin/redis-server --daemonize yes
           mkdir -p kvrocks2redis-ci-data
           ./build/kvrocks --dir "$(pwd)/kvrocks2redis-ci-data" --pidfile "$(pwd)/kvrocks.pid" --daemonize yes
           wait_for "Redis startup on port 6379" redis_matches 6379 PONG ping
