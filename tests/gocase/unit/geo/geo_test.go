@@ -94,9 +94,6 @@ type item struct {
 	lat  float64
 }
 
-var geoAddAndGeoRangeClients []*redis.Client
-var geoAddAndGeoRangeservers []*util.KvrocksServer
-
 func TestGeo(t *testing.T) {
 	configOptions := []util.ConfigOptions{
 		{
@@ -129,25 +126,13 @@ func TestGeo(t *testing.T) {
 
 	for _, configs := range configsMatrix {
 		srv := util.StartServer(t, configs)
-		geoAddAndGeoRangeservers = append(geoAddAndGeoRangeservers, srv)
+		t.Cleanup(srv.Close)
 		rdb := srv.NewClient()
-		geoAddAndGeoRangeClients = append(geoAddAndGeoRangeClients, rdb)
-	}
+		t.Cleanup(func() { require.NoError(t, rdb.Close()) })
 
-	t.Cleanup(func() {
-		for _, srv := range geoAddAndGeoRangeservers {
-			srv.Close()
-		}
-		for _, client := range geoAddAndGeoRangeClients {
-			client.Close()
-		}
-	})
-
-	for i, configs := range configsMatrix {
 		t.Run("TestGeoAddAndGeoRange", func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			rdb := geoAddAndGeoRangeClients[i]
 			for attempt := 0; attempt < 30; attempt++ {
 				var debuginfo string
 				var seed int64
@@ -244,16 +229,12 @@ func TestGeo(t *testing.T) {
 				}
 			}
 		})
-		testGeo(t, configs)
+		testGeo(t, rdb)
 	}
 }
 
-var testGeo = func(t *testing.T, configs util.KvrocksServerConfigs) {
-	srv := util.StartServer(t, configs)
-	defer srv.Close()
+func testGeo(t *testing.T, rdb *redis.Client) {
 	ctx := context.Background()
-	rdb := srv.NewClient()
-	defer func() { require.NoError(t, rdb.Close()) }()
 	t.Run("GEOADD create", func(t *testing.T) {
 		require.EqualValues(t, 1, rdb.GeoAdd(ctx, "nyc", &redis.GeoLocation{Name: "lic market", Longitude: -73.9454966, Latitude: 40.747533}).Val())
 	})
