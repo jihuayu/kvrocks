@@ -26,10 +26,11 @@ RUN dnf install -y epel-release \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-RUN update-alternatives --install /usr/bin/gcc gcc /opt/rh/gcc-toolset-12/root/usr/bin/gcc 100 \
-    && update-alternatives --install /usr/bin/g++ g++ /opt/rh/gcc-toolset-12/root/usr/bin/g++ 100 \
-    && update-alternatives --install /usr/bin/cc cc /opt/rh/gcc-toolset-12/root/usr/bin/gcc 100 \
-    && update-alternatives --install /usr/bin/c++ c++ /opt/rh/gcc-toolset-12/root/usr/bin/g++ 100 \
+# RPM owns /usr/bin/gcc. Put the toolset alternatives earlier on PATH.
+RUN update-alternatives --install /usr/local/bin/gcc gcc /opt/rh/gcc-toolset-12/root/usr/bin/gcc 100 \
+    && update-alternatives --install /usr/local/bin/g++ g++ /opt/rh/gcc-toolset-12/root/usr/bin/g++ 100 \
+    && update-alternatives --install /usr/local/bin/cc cc /opt/rh/gcc-toolset-12/root/usr/bin/gcc 100 \
+    && update-alternatives --install /usr/local/bin/c++ c++ /opt/rh/gcc-toolset-12/root/usr/bin/g++ 100 \
     && pip3 install --no-cache-dir redis==4.3.6
 
 RUN --mount=type=bind,source=install-redis.sh,target=/tmp/install-redis.sh \
