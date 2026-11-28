@@ -17,7 +17,10 @@
 
 FROM archlinux:base
 
-RUN pacman -Syu --noconfirm --needed autoconf automake python python-redis git wget which cmake make gcc zstd \
+# Rosetta cannot apply Pacman's download syscall filter.
+ARG PACMAN_DISABLE_SANDBOX_SYSCALLS=0
+RUN if [ "$PACMAN_DISABLE_SANDBOX_SYSCALLS" = 1 ]; then set -- --disable-sandbox-syscalls; fi \
+    && pacman -Syu --noconfirm --needed "$@" autoconf automake python python-redis git wget which cmake make gcc zstd \
     && pacman -Scc --noconfirm
 
 RUN --mount=type=bind,source=install-redis.sh,target=/tmp/install-redis.sh \
