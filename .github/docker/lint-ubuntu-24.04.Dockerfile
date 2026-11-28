@@ -38,3 +38,14 @@ RUN set -eu; \
     rm -f "/tmp/${archive}" "/tmp/${archive}.sha256"
 
 ENV PATH="/usr/local/go/bin:${PATH}"
+
+ARG GOLANGCI_LINT_VERSION
+RUN set -eu; \
+    cd /tmp; \
+    release="golangci-lint-${GOLANGCI_LINT_VERSION}"; \
+    bundle="${release}-linux-${TARGETARCH}"; \
+    url="https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}"; \
+    wget -q "${url}/${bundle}.tar.gz" "${url}/${release}-checksums.txt"; \
+    sha256sum --check --ignore-missing "${release}-checksums.txt"; \
+    tar -xzf "${bundle}.tar.gz" -C /usr/local/bin --no-same-owner --strip-components=1 "${bundle}/golangci-lint"; \
+    rm "${bundle}.tar.gz" "${release}-checksums.txt"

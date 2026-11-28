@@ -69,7 +69,13 @@ jobs:
           if [[ "$IMAGE_NAME" == 'lint-ubuntu-24.04' ]]; then
             GO_VERSION=$(awk '$1 == "go" { print $2; exit }' tests/gocase/go.mod)
             test -n "$GO_VERSION"
-            echo "go_build_arg=GO_VERSION=$GO_VERSION" >> "$GITHUB_OUTPUT"
+            GOLANGCI_LINT_VERSION=$(python3 -B -c 'import x; print(".".join(map(str, x.GOLANGCI_LINT_REQUIRED_VERSION)))')
+            {
+              echo 'build_args<<EOF'
+              echo "GO_VERSION=$GO_VERSION"
+              echo "GOLANGCI_LINT_VERSION=$GOLANGCI_LINT_VERSION"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
           fi
       - name: Log in to GHCR
         env:
@@ -81,7 +87,7 @@ jobs:
           context: .github/docker
           file: .github/docker/${{ matrix.name }}.Dockerfile
           platforms: linux/amd64
-          build-args: ${{ steps.image.outputs.go_build_arg }}
+          build-args: ${{ steps.image.outputs.build_args }}
           pull: true
           no-cache: ${{ github.event_name == 'schedule' }}
           push: true
