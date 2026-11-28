@@ -1078,8 +1078,9 @@ func TestHashWithAsyncIOEnabled(t *testing.T) {
 			require.Len(t, rdb.HVals(ctx, testKey).Val(), 50)
 
 			require.NoError(t, rdb.Do(ctx, "COMPACT").Err())
-
-			time.Sleep(5 * time.Second)
+			require.Eventually(t, func() bool {
+				return util.FindInfoEntry(rdb, "is_compacting", "rocksdb") == "no"
+			}, 10*time.Second, 20*time.Millisecond)
 
 			require.EqualValues(t, 50, rdb.HLen(ctx, testKey).Val())
 			require.Len(t, rdb.HGetAll(ctx, testKey).Val(), 50)
@@ -1124,8 +1125,9 @@ func TestHashWithAsyncIODisabled(t *testing.T) {
 			require.Len(t, rdb.HVals(ctx, testKey).Val(), 50)
 
 			require.NoError(t, rdb.Do(ctx, "COMPACT").Err())
-
-			time.Sleep(5 * time.Second)
+			require.Eventually(t, func() bool {
+				return util.FindInfoEntry(rdb, "is_compacting", "rocksdb") == "no"
+			}, 10*time.Second, 20*time.Millisecond)
 
 			require.EqualValues(t, 50, rdb.HLen(ctx, testKey).Val())
 			require.Len(t, rdb.HGetAll(ctx, testKey).Val(), 50)
