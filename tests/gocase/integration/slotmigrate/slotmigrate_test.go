@@ -581,7 +581,11 @@ func TestSlotMigrateDataType(t *testing.T) {
 		require.NoError(t, rdb0.SRem(ctx, keys["set"], 1, 3).Err())
 		require.NoError(t, rdb0.Expire(ctx, keys["set"], 10*time.Second).Err())
 		// type zset
-		require.NoError(t, rdb0.ZAdd(ctx, keys["zset"], []redis.Z{{0, "1"}, {2, "3"}, {4, "5"}}...).Err())
+		require.NoError(t, rdb0.ZAdd(ctx, keys["zset"],
+			redis.Z{Score: 0, Member: "1"},
+			redis.Z{Score: 2, Member: "3"},
+			redis.Z{Score: 4, Member: "5"},
+		).Err())
 		require.NoError(t, rdb0.ZRem(ctx, keys["zset"], 1, 3).Err())
 		require.NoError(t, rdb0.Expire(ctx, keys["zset"], 10*time.Second).Err())
 		// type bitmap
@@ -864,12 +868,12 @@ func TestSlotMigrateDataType(t *testing.T) {
 		require.NoError(t, rdb0.SAdd(ctx, keys[5], 1, 2).Err())
 		require.NoError(t, rdb0.SRem(ctx, keys[5], 1).Err())
 		// 4. type zset
-		require.NoError(t, rdb0.ZAdd(ctx, keys[6], []redis.Z{{2, "m1"}}...).Err())
+		require.NoError(t, rdb0.ZAdd(ctx, keys[6], redis.Z{Score: 2, Member: "m1"}).Err())
 		require.NoError(t, rdb0.ZIncrBy(ctx, keys[6], 2, "m1").Err())
 		require.NoError(t, rdb0.ZIncrBy(ctx, keys[6], -1, "m1").Err())
-		require.NoError(t, rdb0.ZAdd(ctx, keys[6], []redis.Z{{3, "m3"}}...).Err())
+		require.NoError(t, rdb0.ZAdd(ctx, keys[6], redis.Z{Score: 3, Member: "m3"}).Err())
 		require.NoError(t, rdb0.ZRem(ctx, keys[6], "m3").Err())
-		require.NoError(t, rdb0.ZAdd(ctx, keys[6], []redis.Z{{1, ""}}...).Err())
+		require.NoError(t, rdb0.ZAdd(ctx, keys[6], redis.Z{Score: 1, Member: ""}).Err())
 		require.NoError(t, rdb0.ZRem(ctx, keys[6], "").Err())
 		// 5. type list
 		require.NoError(t, rdb0.LPush(ctx, keys[7], "item1").Err())
