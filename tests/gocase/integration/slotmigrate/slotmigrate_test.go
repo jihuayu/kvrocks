@@ -41,6 +41,7 @@ const (
 	SlotMigrationStateSuccess SlotMigrationState = "success"
 	SlotMigrationStateFailed  SlotMigrationState = "fail"
 
+	SlotImportStateStarted SlotImportState = "start"
 	SlotImportStateSuccess SlotImportState = "success"
 	SlotImportStateFailed  SlotImportState = "error"
 )
@@ -113,8 +114,7 @@ func TestSlotMigrateDestServerKilled(t *testing.T) {
 		srv1.Close()
 		srv1Alive = false
 		require.NoError(t, rdb0.Do(ctx, "clusterx", "migrate", slot, id1).Err())
-		time.Sleep(50 * time.Millisecond)
-		requireMigrateState(t, rdb0, slot, SlotMigrationStateFailed)
+		waitForMigrateState(t, rdb0, slot, SlotMigrationStateFailed)
 	})
 }
 
@@ -150,11 +150,12 @@ func TestSlotMigrateDestServerKilledAgain(t *testing.T) {
 		require.NoError(t, rdb0.Set(ctx, "", "slot0", 0).Err())
 		require.NoError(t, rdb0.Del(ctx, util.SlotTable[slot]).Err())
 		require.NoError(t, rdb0.Set(ctx, util.SlotTable[slot], "", 0).Err())
-		time.Sleep(500 * time.Millisecond)
 		require.Equal(t, "OK", rdb0.Do(ctx, "clusterx", "migrate", slot, id1).Val())
 		waitForMigrateState(t, rdb0, slot, SlotMigrationStateSuccess)
 		require.Equal(t, "slot0", rdb1.Get(ctx, "").Val())
-		require.Equal(t, "", rdb1.Get(ctx, util.SlotTable[slot]).Val())
+		value, err := rdb1.Get(ctx, util.SlotTable[slot]).Result()
+		require.NoError(t, err)
+		require.Empty(t, value)
 		require.NoError(t, rdb1.Del(ctx, util.SlotTable[slot]).Err())
 	})
 
@@ -168,7 +169,7 @@ func TestSlotMigrateDestServerKilledAgain(t *testing.T) {
 		require.Equal(t, "OK", rdb0.Do(ctx, "clusterx", "migrate", slot, id1).Val())
 		k2 := fmt.Sprintf("\x49\x1f\x7f{%s}\xaf", util.SlotTable[slot])
 		require.NoError(t, rdb0.Set(ctx, k2, "\0000\0001", 0).Err())
-		time.Sleep(time.Second)
+		waitForMigrateState(t, rdb0, slot, SlotMigrationStateSuccess)
 		waitForImportState(t, rdb1, slot, SlotImportStateSuccess)
 		require.EqualValues(t, cnt, rdb1.LLen(ctx, k1).Val())
 		require.Equal(t, "\0000\0001", rdb1.LPop(ctx, k1).Val())
@@ -179,10 +180,11 @@ func TestSlotMigrateDestServerKilledAgain(t *testing.T) {
 		slot := 2
 		require.NoError(t, rdb0.FlushDB(ctx).Err())
 		require.NoError(t, rdb1.FlushDB(ctx).Err())
-		time.Sleep(500 * time.Millisecond)
 		require.Equal(t, "OK", rdb0.Do(ctx, "clusterx", "migrate", slot, id1).Val())
 		waitForMigrateState(t, rdb0, slot, SlotMigrationStateSuccess)
-		require.NoError(t, rdb1.Keys(ctx, "*").Err())
+		keys, err := rdb1.Keys(ctx, "*").Result()
+		require.NoError(t, err)
+		require.Empty(t, keys)
 	})
 
 	t.Run("MIGRATE - Fail to migrate slot because destination server is killed while migrating", func(t *testing.T) {
@@ -195,11 +197,11 @@ func TestSlotMigrateDestServerKilledAgain(t *testing.T) {
 			require.NoError(t, rdb0.LPush(ctx, util.SlotTable[slot], value).Err())
 		}
 		require.Equal(t, "OK", rdb0.Do(ctx, "clusterx", "migrate", slot, id1).Val())
+		waitForImportState(t, rdb1, slot, SlotImportStateStarted)
 		requireMigrateState(t, rdb0, slot, SlotMigrationStateStarted)
 		srv1.Close()
 		srv1Alive = false
-		time.Sleep(time.Second)
-		requireMigrateState(t, rdb0, slot, SlotMigrationStateFailed)
+		waitForMigrateState(t, rdb0, slot, SlotMigrationStateFailed)
 	})
 }
 
@@ -258,13 +260,16 @@ func TestSlotMigrateSourceServerFlushedOrKilled(t *testing.T) {
 		}
 		require.Equal(t, "OK", rdb0.Do(ctx, "clusterx", "migrate", slot, id1).Val())
 		require.Eventually(t, func() bool {
-			return slices.Contains(rdb1.Keys(ctx, "*").Val(), util.SlotTable[slot])
-		}, 5*time.Second, 100*time.Millisecond)
+			keys, err := rdb1.Keys(ctx, "*").Result()
+			return err == nil && slices.Contains(keys, util.SlotTable[slot])
+		}, 5*time.Second, 20*time.Millisecond)
 
 		srv0.Close()
 		srv0Alive = false
-		time.Sleep(100 * time.Millisecond)
-		require.NotContains(t, rdb1.Keys(ctx, "*").Val(), util.SlotTable[slot])
+		waitForImportState(t, rdb1, slot, SlotImportStateFailed)
+		keys, err := rdb1.Keys(ctx, "*").Result()
+		require.NoError(t, err)
+		require.NotContains(t, keys, util.SlotTable[slot])
 	})
 }
 
@@ -1250,11 +1255,7 @@ func waitForMigrateSlotRangeState(t testing.TB, client *redis.Client, slotRange 
 }
 
 func waitForMigrateStateInDuration(t testing.TB, client *redis.Client, slot int, state SlotMigrationState, d time.Duration) {
-	require.Eventually(t, func() bool {
-		i := client.ClusterInfo(context.Background()).Val()
-		return strings.Contains(i, fmt.Sprintf("migrating_slot(s): %d", slot)) &&
-			strings.Contains(i, fmt.Sprintf("migrating_state: %s", state))
-	}, d, 100*time.Millisecond)
+	waitForMigrateSlotRangeStateInDuration(t, client, strconv.Itoa(slot), state, d)
 }
 
 func waitForMigrateSlotRangeStateInDuration(t testing.TB, client *redis.Client, slotRange string, state SlotMigrationState, d time.Duration) {
@@ -1262,11 +1263,21 @@ func waitForMigrateSlotRangeStateInDuration(t testing.TB, client *redis.Client, 
 	if len(slots) == 2 && slots[0] == slots[1] {
 		slotRange = slots[0]
 	}
+	ctx := context.Background()
+	slotLine := "migrating_slot(s): " + slotRange + "\r\n"
+	stateLine := "migrating_state: " + string(state) + "\r\n"
 	require.Eventually(t, func() bool {
-		i := client.ClusterInfo(context.Background()).Val()
-		return strings.Contains(i, fmt.Sprintf("migrating_slot(s): %s", slotRange)) &&
-			strings.Contains(i, fmt.Sprintf("migrating_state: %s", state))
-	}, d, 100*time.Millisecond)
+		info := client.ClusterInfo(ctx).Val()
+		if !strings.Contains(info, slotLine) || !strings.Contains(info, stateLine) {
+			return false
+		}
+		if state == SlotMigrationStateStarted {
+			return true
+		}
+		// The terminal state is published before the migrator releases the job.
+		nodes, err := client.ClusterNodes(ctx).Result()
+		return err == nil && !strings.Contains(nodes, "->-")
+	}, d, 20*time.Millisecond, "slot range %s did not reach migration state %s", slotRange, state)
 }
 
 func requireMigrateState(t testing.TB, client *redis.Client, slot int, state SlotMigrationState) {
@@ -1282,11 +1293,16 @@ func requireMigrateSlotRangeState(t testing.TB, client *redis.Client, slotRange 
 }
 
 func waitForImportState(t testing.TB, client *redis.Client, n int, state SlotImportState) {
+	waitForImportSlotRangeState(t, client, strconv.Itoa(n), state)
+}
+
+func waitForImportSlotRangeState(t testing.TB, client *redis.Client, slotRange string, state SlotImportState) {
+	slotLine := "importing_slot(s): " + slotRange + "\r\n"
+	stateLine := "import_state: " + string(state) + "\r\n"
 	require.Eventually(t, func() bool {
 		i := client.ClusterInfo(context.Background()).Val()
-		return strings.Contains(i, fmt.Sprintf("importing_slot(s): %d", n)) &&
-			strings.Contains(i, fmt.Sprintf("import_state: %s", state))
-	}, 10*time.Second, 100*time.Millisecond)
+		return strings.Contains(i, slotLine) && strings.Contains(i, stateLine)
+	}, 10*time.Second, 20*time.Millisecond, "slot range %s did not reach import state %s", slotRange, state)
 }
 
 func migrateSlotRangeAndSetSlot(t *testing.T, ctx context.Context, source *redis.Client, dest *redis.Client, destID string, slotRange string) {
@@ -1344,11 +1360,8 @@ func TestSlotRangeMigrate(t *testing.T) {
 		}
 
 		migrateSlotRangeAndSetSlot(t, ctx, rdb0, rdb1, id1, "10")
-		time.Sleep(1 * time.Second)
 		migrateSlotRangeAndSetSlot(t, ctx, rdb0, rdb1, id1, "11-11")
-		time.Sleep(1 * time.Second)
 		migrateSlotRangeAndSetSlot(t, ctx, rdb1, rdb0, id0, "16383-16383")
-		time.Sleep(1 * time.Second)
 		nodes := rdb0.ClusterNodes(ctx).Val()
 		require.Contains(t, nodes, "12-10000 16383", "0-11 10001-16382")
 
@@ -1367,11 +1380,8 @@ func TestSlotRangeMigrate(t *testing.T) {
 	t.Run("MIGRATE - Repeat migration cases", func(t *testing.T) {
 		// non-overlapping
 		migrateSlotRangeAndSetSlot(t, ctx, rdb0, rdb1, id1, "104-106")
-		time.Sleep(1 * time.Second)
 		migrateSlotRangeAndSetSlot(t, ctx, rdb0, rdb1, id1, "107-108")
-		time.Sleep(1 * time.Second)
 		migrateSlotRangeAndSetSlot(t, ctx, rdb0, rdb1, id1, "102-103")
-		time.Sleep(1 * time.Second)
 		nodes := rdb0.ClusterNodes(ctx).Val()
 		require.Contains(t, nodes, "12-101 109-10000 16383", "0-11 102-108 10001-16382")
 
@@ -1417,9 +1427,7 @@ func TestSlotRangeMigrate(t *testing.T) {
 
 	t.Run("MIGRATE - Migrate back a proper subset range", func(t *testing.T) {
 		migrateSlotRangeAndSetSlot(t, ctx, rdb0, rdb1, id1, "3100-3400")
-		time.Sleep(1 * time.Second)
 		migrateSlotRangeAndSetSlot(t, ctx, rdb1, rdb0, id0, "3200-3300")
-		time.Sleep(1 * time.Second)
 
 		key := "AAA" // CLUSTER KEYSLOT AAA is `3205`, which is in the range of `3200-3500`
 		require.Equal(t, int64(3205), rdb0.ClusterKeySlot(ctx, key).Val())
@@ -1438,10 +1446,10 @@ func TestSlotRangeMigrate(t *testing.T) {
 			require.NoError(t, rdb0.LPush(ctx, util.SlotTable[largeSlot], value).Err())
 		}
 		require.Equal(t, "OK", rdb0.Do(ctx, "clusterx", "migrate", "200-220", id1).Val())
+		waitForImportSlotRangeState(t, rdb1, "200-220", SlotImportStateStarted)
 		requireMigrateSlotRangeState(t, rdb0, "200-220", SlotMigrationStateStarted)
 		srv1Alive = false
 		srv1.Close()
-		time.Sleep(time.Second)
 		// TODO: More precise migration failure slot range
 		waitForMigrateSlotRangeState(t, rdb0, "200-220", SlotMigrationStateFailed)
 	})
