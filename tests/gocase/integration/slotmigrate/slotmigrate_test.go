@@ -166,9 +166,14 @@ func TestSlotMigrateDestServerKilledAgain(t *testing.T) {
 		for i := 0; i < cnt; i++ {
 			require.NoError(t, rdb0.LPush(ctx, k1, "\0000\0001").Err())
 		}
+		// Let the importer start, then hold APPLYBATCH until the source write enters the WAL.
+		require.NoError(t, rdb1.Do(ctx, "CLIENT", "PAUSE", 15000, "WRITE").Err())
+		t.Cleanup(func() { require.NoError(t, rdb1.Do(ctx, "CLIENT", "UNPAUSE").Err()) })
 		require.Equal(t, "OK", rdb0.Do(ctx, "clusterx", "migrate", slot, id1).Val())
+		waitForImportState(t, rdb1, slot, SlotImportStateStarted)
 		k2 := fmt.Sprintf("\x49\x1f\x7f{%s}\xaf", util.SlotTable[slot])
 		require.NoError(t, rdb0.Set(ctx, k2, "\0000\0001", 0).Err())
+		require.NoError(t, rdb1.Do(ctx, "CLIENT", "UNPAUSE").Err())
 		waitForMigrateState(t, rdb0, slot, SlotMigrationStateSuccess)
 		waitForImportState(t, rdb1, slot, SlotImportStateSuccess)
 		require.EqualValues(t, cnt, rdb1.LLen(ctx, k1).Val())
