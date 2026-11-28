@@ -229,11 +229,19 @@ class TestCIPlan(unittest.TestCase):
         self.assertEqual(plan["tier"], "t2")
         self.assertEqual(len(plan["container_matrix"]), 6)
 
+    def test_tier1_adds_alpine_smoke_checks_for_image_infrastructure(self) -> None:
+        for path in (".github/docker/alpine-3.22.Dockerfile", ".github/workflows/ci-images.yaml"):
+            with self.subTest(path=path):
+                plan = ci_plan.build_plan(event_name="pull_request", changed_files=[path])
+                self.assertEqual(plan["tier"], "t1")
+                self.assertTrue(plan["run_docker"])
+                self.assertEqual([job["ci_image_name"] for job in plan["container_matrix"]], ["alpine-3.22"])
+
     def test_tier2_keeps_all_distro_containers_without_ccache(self) -> None:
         jobs = ci_plan.tier2_container_matrix()
         self.assertCountEqual(
-            [job["image"] for job in jobs],
-            ["opensuse/leap:15", "archlinux:base", "rockylinux:8", "rockylinux:9", "debian:12", "alpine:3.22"],
+            [job["ci_image_name"] for job in jobs],
+            ["opensuse-15", "archlinux", "rocky-8", "rocky-9", "debian-12", "alpine-3.22"],
         )
         for job in jobs:
             with self.subTest(job=job["name"]):

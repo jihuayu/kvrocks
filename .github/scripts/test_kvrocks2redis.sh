@@ -19,7 +19,8 @@
 
 set -euo pipefail
 
-redis_cli="$HOME/local/bin/redis-cli"
+redis_bin_dir="${REDIS_BIN_DIR:-$HOME/local/bin}"
+redis_cli="$redis_bin_dir/redis-cli"
 data_dir="$PWD/kvrocks2redis-ci-data"
 
 fail() {
@@ -67,7 +68,7 @@ wait_for_sync() {
   done
 }
 
-"$HOME/local/bin/redis-server" --daemonize yes
+"$redis_bin_dir/redis-server" --daemonize yes
 mkdir -p "$data_dir"
 ./build/kvrocks --dir "$data_dir" --pidfile "$PWD/kvrocks.pid" --daemonize yes
 for _ in {1..100}; do
